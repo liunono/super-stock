@@ -1,6 +1,7 @@
 streamlit
 pandas
 pymysql
-requests
+sqlalchemy
 yfinance
-pandas-ta
+pandas_ta
+cryptography
