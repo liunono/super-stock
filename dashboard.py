@@ -9,15 +9,15 @@ import requests
 import json
 from datetime import datetime
 
-# ================= 系統設定區 =================
+# ================= 1. 系統設定區 =================
 try:
     # 建立資料庫引擎
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}"
     engine = create_engine(DB_URL)
     
     # LINE 設定
-    LINE_CHANNEL_ACCESS_TOKEN = st.secrets["LINE_CHANNEL_ACCESS_TOKEN"]
-    YOUR_LINE_USER_ID = st.secrets["YOUR_LINE_USER_ID"]
+    LINE_TOKEN = st.secrets["LINE_CHANNEL_ACCESS_TOKEN"]
+    USER_ID = st.secrets["YOUR_LINE_USER_ID"]
     
     # 瀏覽器偽裝 Session
     session = requests.Session()
@@ -28,11 +28,24 @@ except Exception as e:
     st.error(f"❌ 系統啟動失敗，請檢查 Secrets：{e}")
     st.stop()
 
-# ================= 核心策略引擎 (數據全透明) =================
+# ================= 2. 樣式工具模組 (放在頂層避免對齊錯誤) =================
+def style_rows(row):
+    """處理表格整行背景色"""
+    if '🔥' in str(row['評等']): 
+        return ['background-color: #FFCCCC'] * len(row)
+    if '✨' in str(row['評等']): 
+        return ['background-color: #FFF3CD'] * len(row)
+    return [''] * len(row)
+
+def color_text(val):
+    """處理特定文字加粗"""
+    if '🔥' in str(val) or '✨' in str(val): 
+        return 'color: red; font-weight: bold'
+    return ''
+
+# ================= 3. 策略引擎 =================
 def fetch_full_data(ticker, mode="strict"):
-    """
-    回傳：(評等, 現價, 漲跌幅, 月線, RSI, 成交量)
-    """
+    """回傳：(評等, 現價, 漲跌幅, 月線, RSI, 成交量)"""
     tickers_to_try = [ticker]
     if ".TWO" in ticker: tickers_to_try.append(ticker.replace(".TWO", ".TW"))
     elif ".TW" in ticker: tickers_to_try.append(ticker.replace(".TW", ".TWO"))
@@ -46,7 +59,6 @@ def fetch_full_data(ticker, mode="strict"):
                 close_series = data['Close']
                 if isinstance(close_series, pd.DataFrame): close_series = close_series.iloc[:, 0]
                 
-                # 計算指標
                 sma20 = ta.sma(close_series, length=20)
                 rsi = ta.rsi(close_series, length=14)
                 
@@ -61,7 +73,6 @@ def fetch_full_data(ticker, mode="strict"):
                 ma20_val = round(float(sma20.iloc[-1]), 2) if sma20 is not None else 0
                 rsi_val = round(float(rsi.iloc[-1]), 2) if rsi is not None else 0
                 
-                # 判定邏輯
                 res = "⏳ 盤整觀察"
                 if last_close > ma20_val:
                     if mode == "strict" and rsi_val > 55: res = "🔥 確定要飛"
@@ -74,30 +85,27 @@ def fetch_full_data(ticker, mode="strict"):
         except: continue
     return "❌ 查無資料", 0, 0, 0, 0, 0
 
-# ================= 介面設計 =================
-st.set_page_config(page_title="哲哲量化戰情室 V13.5", layout="wide")
-st.title("📈 哲哲量化戰情室 V13.5 - 數據全透明校準版")
+# ================= 4. 介面設計 =================
+st.set_page_config(page_title="哲哲量化戰情室 V14.0", layout="wide")
+st.title("📈 哲哲量化戰情室 V14.0 - 終極全線噴發版")
 
 tab1, tab2 = st.tabs(["🚀 核心策略掃描", "🛠️ 系統工具"])
 
 with tab1:
-    st.info("💡 哲哲提示：本版已全開所有運算細節，助您洞察群聯等潛力股的實時位階！")
+    st.info("💡 哲哲提示：數據全亮牌！現價、MA20、RSI 數值一覽無遺！")
     col_a, col_b = st.columns(2)
     
     def perform_full_scan(mode_name, mode_key, icon):
-        # 讀取股票池
         df_stocks = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
-        
         if not df_stocks.empty:
             results, prices, changes, ma20s, rsis, volumes = [], [], [], [], [], []
             prog = st.progress(0)
             stat = st.empty()
-            
             total = len(df_stocks)
+            
             for i, row in df_stocks.iterrows():
                 stat.text(f"🔎 {mode_name}偵測中 ({i+1}/{total})：{row['ticker']} {row['stock_name']}...")
                 res, p, c, ma, r, v = fetch_full_data(row['ticker'], mode=mode_key)
-                
                 results.append(res)
                 prices.append(p)
                 changes.append(c)
@@ -106,7 +114,6 @@ with tab1:
                 volumes.append(v)
                 prog.progress((i + 1) / total)
             
-            # 整合數據
             df_stocks['評等'] = results
             df_stocks['現價'] = prices
             df_stocks['漲跌幅(%)'] = changes
@@ -116,7 +123,7 @@ with tab1:
             
             stat.success(f"✨ {mode_name}掃描完成！")
             
-            # LINE 推播 (直接發送)
+            # --- LINE 推播 ---
             hit_stocks = df_stocks[df_stocks['評等'].str.contains(mode_name)]
             msg = f"{icon}【哲哲戰情室 - {mode_name}戰報】\n📅 {datetime.now().strftime('%m/%d %H:%M')}\n"
             if not hit_stocks.empty:
@@ -127,36 +134,21 @@ with tab1:
             else:
                 msg += "⏳ 暫無符合標的，耐心是獲利的關鍵！"
             
-            # 呼叫 LINE 推播
-            url = "https://api.line.me/v2/bot/message/push"
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
-            payload = {"to": YOUR_LINE_USER_ID, "messages": [{"type": "text", "text": msg}]}
-            requests.post(url, headers=headers, data=json.dumps(payload))
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
+            payload = {"to": USER_ID, "messages": [{"type": "text", "text": msg}]}
+            requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps(payload))
             
-            # --- 樣式美化 (對齊修正版) ---
-            def style_rows(row):
-                if '🔥' in str(row['評等']): return ['background-color: #FFCCCC'] * len(row)
-                if '✨' in str(row['評等']): return ['background-color: #FFF3CD'] * len(row)
-                return [''] * len(row)
-
-            # 建立樣式
+            # --- 樣式渲染 ---
             styler = df_stocks.style.apply(style_rows, axis=1)
-            
-            # 針對評等文字加強 (處理 map/applymap 報錯)
-            def color_text(val):
-                if '🔥' in str(val) or '✨' in str(val): return 'color: red; font-weight: bold'
-                return ''
-
             if hasattr(styler, 'map'):
                 styler = styler.map(color_text, subset=['評等'])
             else:
                 styler = styler.applymap(color_text, subset=['評等'])
-
-            # 🚀 數據噴發！2026 最新渲染規格
+            
             st.dataframe(styler, width='stretch')
             st.balloons()
         else:
-            st.info("資料庫目前沒有股票，請先匯入。")
+            st.info("資料庫是空的。")
 
     with col_a:
         if st.button("🔥 啟動：確定要飛 (RSI > 55)"):
@@ -167,10 +159,5 @@ with tab1:
             perform_full_scan("準備起飛", "potential", "✨")
 
 with tab2:
-    st.write("連線狀態：✅ 正常運行中")
     if st.button("🔔 測試 LINE 通訊"):
-        url = "https://api.line.me/v2/bot/message/push"
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
-        payload = {"to": YOUR_LINE_USER_ID, "messages": [{"type": "text", "text": "📣 哲哲戰情室：測試成功，賺到流湯！"}]}
-        requests.post(url, headers=headers, data=json.dumps(payload))
-        st.success("測試訊息已發出！")
+        st.write("連線測試中...")
