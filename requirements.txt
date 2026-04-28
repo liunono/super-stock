@@ -3,4 +3,4 @@ pandas
 pymysql
 requests
 yfinance
-pandas_ta
+pandas-ta
