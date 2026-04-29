@@ -1,148 +1,185 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import create_engine, text
 import yfinance as yf
 import pandas_ta as ta
-import time
-import random
-import requests
-import json
+import time, random, requests, json
+from sqlalchemy import create_engine, text
 from datetime import datetime
 
-# ================= 1. 系統地基 (Secrets 連線) =================
+# ================= 1. 系統設定 =================
 try:
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}"
     engine = create_engine(DB_URL)
     LINE_TOKEN = st.secrets["LINE_CHANNEL_ACCESS_TOKEN"]
     USER_ID = st.secrets["YOUR_LINE_USER_ID"]
-    # 🚀 哲哲修正：雲端不再建立自定義 Session，避免觸發 Yahoo API 錯誤
 except Exception as e:
-    st.error(f"❌ 系統啟動失敗：{e}")
+    st.error(f"❌ 初始化失敗：{e}")
     st.stop()
 
-# ================= 2. 樣式模組 =================
-def style_final_df(df):
-    def row_color(row):
-        if '🔥' in str(row['評等']): return ['background-color: #FFCCCC'] * len(row)
-        if '✨' in str(row['評等']): return ['background-color: #FFF3CD'] * len(row)
-        return [''] * len(row)
-    
-    styler = df.style.apply(row_color, axis=1)
-    def bold_text(val):
-        if '🔥' in str(val) or '✨' in str(val): return 'color: red; font-weight: bold'
-        return ''
-    
-    if hasattr(styler, 'map'): styler = styler.map(bold_text, subset=['評等'])
-    else: styler = styler.applymap(bold_text, subset=['評等'])
-    return styler
-
-# ================= 3. 策略引擎 (同步 C 槽測試成功的邏輯) =================
-def fetch_row_data(ticker, name, mode="strict"):
-    tickers_to_try = [ticker]
-    if ".TWO" in ticker: tickers_to_try.append(ticker.replace(".TWO", ".TW"))
-    elif ".TW" in ticker: tickers_to_try.append(ticker.replace(".TW", ".TWO"))
-
-    for current_ticker in tickers_to_try:
-        try:
-            # 隨機延遲依然保留，模擬大戶的沉穩
-            time.sleep(random.uniform(1.2, 2.5))
+# ================= 2. 數據獲取引擎 (擴充數據指標) =================
+def fetch_master_data(ticker):
+    try:
+        time.sleep(random.uniform(1.1, 2.0))
+        stock = yf.Ticker(ticker)
+        data = stock.history(period="6mo", interval="1d", timeout=20)
+        
+        if data is not None and len(data) >= 60:
+            close = data['Close']
+            vol = data['Volume']
             
-            # 🚀 關鍵修復：改用 Ticker 物件，不帶 session 參數
-            stock = yf.Ticker(current_ticker)
-            data = stock.history(period="3mo", interval="1d", timeout=20)
+            # --- 哲哲指標大補帖 ---
+            sma5 = ta.sma(close, length=5)
+            sma20 = ta.sma(close, length=20)
+            sma60 = ta.sma(close, length=60)
+            rsi = ta.rsi(close, length=14)
+            bb = ta.bbands(close, length=20, std=2)
+            avg_vol = ta.sma(vol, length=20) # 20日均量
             
-            if data is not None and len(data) >= 2:
-                # history() 回傳的資料非常乾淨，直接取 Series
-                close = data['Close']
-                sma20 = ta.sma(close, length=20)
-                rsi = ta.rsi(close, length=14)
-                
-                last_p = round(float(close.iloc[-1]), 2)
-                prev_p = float(close.iloc[-2])
-                change = round(((last_p - prev_p) / prev_p) * 100, 2)
-                vol = int(data['Volume'].iloc[-1])
-                ma_val = round(float(sma20.iloc[-1]), 2) if sma20 is not None else 0
-                r_val = round(float(rsi.iloc[-1]), 2) if rsi is not None else 0
-                
-                res = "⏳ 盤整觀察"
-                if last_p > ma_val:
-                    if mode == "strict" and r_val > 55: res = "🔥 確定要飛"
-                    elif mode == "potential" and r_val > 50: res = "✨ 準備起飛"
-                elif last_p < ma_val and r_val < 45: res = "📉 弱勢整理"
-                
-                return {"代號": ticker, "名稱": name, "評等": res, "現價": last_p, "漲跌(%)": change, "月線": ma_val, "RSI": r_val, "成交量": vol}
-            break
-        except: continue
-    return {"代號": ticker, "名稱": name, "評等": "❌ 查無", "現價": 0, "漲跌(%)": 0, "月線": 0, "RSI": 0, "成交量": 0}
+            last_p = round(float(close.iloc[-1]), 2)
+            prev_p = float(close.iloc[-2])
+            
+            return {
+                "Ticker": ticker, "Price": last_p, 
+                "Change": round(((last_p - prev_p) / prev_p) * 100, 2),
+                "SMA5": round(float(sma5.iloc[-1]), 2),
+                "MA20": round(float(sma20.iloc[-1]), 2),
+                "MA60": round(float(sma60.iloc[-1]), 2),
+                "RSI": round(float(rsi.iloc[-1]), 2),
+                "BBL": round(float(bb.iloc[-1, 0]), 2),
+                "BBU": round(float(bb.iloc[-1, 2]), 2),
+                "Vol": int(vol.iloc[-1]),
+                "AvgVol": int(avg_vol.iloc[-1]) if avg_vol is not None else 0
+            }
+    except: pass
+    return None
 
-# ================= 4. 介面設計 =================
-st.set_page_config(page_title="哲哲量化戰情室 V16.2", layout="wide")
-st.title("📈 哲哲量化戰情室 V16.2 - 數據合體最終版")
+# ================= 3. 五大必勝買入策略 (新註冊) =================
+def strat_buy_gold_cross(r):
+    # MA20 穿過 MA60 多頭排列
+    return "🚀 黃金交叉" if r['Price'] > r['MA20'] > r['MA60'] else "⏳"
 
-tab1, tab2 = st.tabs(["🚀 核心策略掃描中心", "🛠️ 數據管理中心"])
+def strat_buy_vol_breakout(r):
+    # 股價突破月線且爆量 (大於均量2倍)
+    return "💥 量價突破" if r['Price'] > r['MA20'] and r['Vol'] > (r['AvgVol'] * 2) else "⏳"
 
+def strat_buy_rsi_oversold(r):
+    # RSI 低檔背離反彈
+    return "🛡️ 超跌反彈" if r['RSI'] < 35 and r['Price'] > r['SMA5'] else "⏳"
+
+def strat_buy_bb_squeeze(r):
+    # 布林縮窄後向上突破
+    return "🌀 布林噴發" if r['Price'] > r['BBU'] and r['Price'] > r['MA20'] else "⏳"
+
+def strat_buy_backtest(r):
+    # 強勢股回測月線不破
+    return "🎯 強勢回測" if abs(r['Price'] - r['MA20'])/r['MA20'] < 0.02 and r['Price'] > r['MA20'] else "⏳"
+
+# ================= 4. 五大專業賣出攻略 (新註冊) =================
+def strat_sell_rsi_hot(r): return "🛑 RSI過熱" if r['RSI'] > 80 else "✅ 持有"
+def strat_sell_dead_cross(r): return "💀 死亡交叉" if r['Price'] < r['MA20'] else "✅ 持有"
+def strat_sell_bb_touch(r): return "🔔 觸碰上軌" if r['Price'] >= r['BBU'] else "✅ 持有"
+def strat_sell_trailing(r): return "📉 破五日線" if r['Price'] < r['SMA5'] else "✅ 持有"
+def strat_sell_weak(r): return "⚠️ 轉弱訊號" if r['Change'] < -3 and r['RSI'] < 50 else "✅ 持有"
+
+BUY_STRATEGIES = {
+    "🚀 黃金交叉版": strat_buy_gold_cross,
+    "💥 量價突破版": strat_buy_vol_breakout,
+    "🛡️ 低階抄底版": strat_buy_rsi_oversold,
+    "🌀 布林擠壓版": strat_buy_bb_squeeze,
+    "🎯 強勢回測版": strat_buy_backtest
+}
+
+SELL_STRATEGIES = {
+    "🛑 RSI過熱賣出": strat_sell_rsi_hot,
+    "💀 跌破月線賣出": strat_sell_dead_cross,
+    "🔔 觸碰上軌賣出": strat_sell_bb_touch,
+    "📉 破五日線快跑": strat_sell_trailing,
+    "⚠️ 趨勢轉弱賣出": strat_sell_weak
+}
+
+# ================= 5. UI 邏輯 =================
+st.set_page_config(page_title="哲哲戰情室 V18.0", layout="wide")
+st.title("📈 哲哲量化戰情室 V18.0 - 買賣全能版")
+
+tab1, tab2, tab3 = st.tabs(["🚀 買入策略掃描", "💼 我的持倉管理", "🛠️ 系統補給站"])
+
+# --- Tab 1: 買入掃描 ---
 with tab1:
-    st.info("💡 哲哲提示：數據已同步 C 槽測試邏輯，修正了 Yahoo API 的對接問題！")
-    c1, c2 = st.columns(2)
-    
-    def run_live_scan(m_name, m_key, icon):
+    if st.button("📦 第一步：全線獲取數據"):
         df_stocks = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
-        if df_stocks.empty:
-            st.warning("資料庫目前沒有股票，請先去數據管理頁面匯入。")
-            return
+        if not df_stocks.empty:
+            master_list = []
+            prog = st.progress(0)
+            for i, row in df_stocks.iterrows():
+                data = fetch_master_data(row['ticker'])
+                if data:
+                    data['Name'] = row['stock_name']
+                    master_list.append(data)
+                prog.progress((i + 1) / len(df_stocks))
+            st.session_state['master_df'] = pd.DataFrame(master_list)
+            st.success("數據更新完成！")
 
-        prog = st.progress(0)
-        stat = st.empty()
-        live_table = st.empty()
-        all_results = []
+    if 'master_df' in st.session_state:
+        st.divider()
+        cols = st.columns(len(BUY_STRATEGIES))
+        for i, (name, func) in enumerate(BUY_STRATEGIES.items()):
+            if cols[i].button(name):
+                df = st.session_state['master_df'].copy()
+                df['評等'] = df.apply(func, axis=1)
+                hits = df[df['評等'] != "⏳"]
+                st.write(f"🎯 符合 {name}: {len(hits)} 檔")
+                st.dataframe(df[df['評等'] != "⏳"], width=1200)
 
-        total = len(df_stocks)
-        for i, row in df_stocks.iterrows():
-            stat.text(f"🔎 {m_name}偵測中 ({i+1}/{total})：{row['ticker']} {row['stock_name']}...")
-            result = fetch_row_data(row['ticker'], row['stock_name'], mode=m_key)
-            all_results.append(result)
-            
-            # 即時顯示，掌握第一手訊息
-            live_table.dataframe(pd.DataFrame(all_results), width=1200)
-            prog.progress((i + 1) / total)
-
-        stat.success(f"✨ {m_name}全線掃描完成！")
-        final_df = pd.DataFrame(all_results)
-        live_table.dataframe(style_final_df(final_df), width=1200)
-        st.balloons()
-        
-        # LINE 彙整通知
-        hits = final_df[final_df['評等'].str.contains(m_name)]
-        msg = f"{icon}【哲哲戰報-{m_name}】\n"
-        if not hits.empty:
-            msg += "\n".join([f"✅ {r['代號']} {r['名稱']} (RSI:{r['RSI']})" for _, r in hits.iterrows()])
-            msg += "\n\n跟我預測的一模一樣，準備賺到流湯！"
-        else:
-            msg += "⏳ 今日盤勢整理，暫無符合標的。"
-        
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
-        payload = {"to": USER_ID, "messages": [{"type": "text", "text": msg}]}
-        requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps(payload))
-
-    with c1:
-        if st.button("🔥 確定要飛 (RSI > 55)"): run_live_scan("確定要飛", "strict", "🔥")
-    with c2:
-        if st.button("✨ 準備起飛 (RSI > 50)"): run_live_scan("準備起飛", "potential", "✨")
-
+# --- Tab 2: 持倉管理 (新功能！) ---
 with tab2:
-    st.header("🛠️ 數據管理補給站")
-    col_x, col_y = st.columns(2)
-    with col_x:
-        if st.button("🧨 一鍵清空所有股票"):
-            with engine.connect() as conn:
-                conn.execute(text("SET FOREIGN_KEY_CHECKS = 0; DELETE FROM stock_pool; SET FOREIGN_KEY_CHECKS = 1;"))
-                conn.commit()
-            st.warning("💥 清空成功！")
-    with col_y:
-        up_file = st.file_uploader("上傳 CSV (ticker, stock_name, sector)", type="csv")
-        if up_file and st.button("💾 正式匯入資料庫"):
-            df_up = pd.read_csv(up_file, encoding='utf-8-sig')
-            df_up['ticker'] = df_up['ticker'].astype(str).str.strip().str.upper()
-            df_up = df_up[df_up['ticker'].str.contains(r'\.', na=False)]
-            df_up.to_sql('stock_pool', con=engine, if_exists='append', index=False)
-            st.success(f"✅ 成功匯入 {len(df_up)} 檔！")
+    st.header("💼 我的現有部位管理")
+    
+    # 匯入界面
+    with st.expander("➕ 新增/匯入持倉"):
+        up_portfolio = st.file_uploader("上傳持倉 CSV (ticker, stock_name, entry_price, qty)", type="csv")
+        if up_portfolio and st.button("💾 確認匯入"):
+            df_p = pd.read_csv(up_portfolio)
+            df_p.to_sql('portfolio', con=engine, if_exists='append', index=False)
+            st.success("持倉匯入成功！")
+
+    # 獲利計算與賣出策略
+    st.subheader("📊 部位即時監控與賣出建議")
+    if 'master_df' in st.session_state:
+        df_port = pd.read_sql("SELECT * FROM portfolio", con=engine)
+        if not df_port.empty:
+            # 合併最新價格
+            m_df = st.session_state['master_df'][['Ticker', 'Price', 'SMA5', 'MA20', 'BBU', 'RSI', 'Change']]
+            merged = pd.merge(df_port, m_df, left_on='ticker', right_on='Ticker', how='left')
+            
+            # 計算獲利
+            merged['獲利($)'] = (merged['Price'] - merged['entry_price']) * merged['qty'] * 1000 # 假設單位是張
+            merged['報酬率(%)'] = round(((merged['Price'] - merged['entry_price']) / merged['entry_price']) * 100, 2)
+            
+            # 應用賣出策略 (選一個你最想參考的，這裡示範全部運算後列出建議)
+            def get_sell_advice(r):
+                advices = []
+                for s_name, s_func in SELL_STRATEGIES.items():
+                    if s_func(r) != "✅ 持有": advices.append(s_name)
+                return ", ".join(advices) if advices else "💎 續抱"
+
+            merged['賣出建議'] = merged.apply(get_sell_advice, axis=1)
+            
+            # 樣式處理
+            st.dataframe(merged[['ticker', 'stock_name', 'entry_price', 'Price', '報酬率(%)', '獲利($)', '賣出建議']].style.map(
+                lambda x: 'color: red' if x > 0 else 'color: green', subset=['報酬率(%)']
+            ))
+            
+            total_profit = merged['獲利($)'].sum()
+            st.metric("總預估獲利", f"${total_profit:,.0f}", f"{total_profit/10000:.2f} 萬")
+        else:
+            st.info("目前尚無持倉數據。")
+    else:
+        st.warning("請先到『買入策略掃描』點擊獲取數據，才能計算持倉獲利！")
+
+# --- Tab 3: 管理 ---
+with tab3:
+    if st.button("🧨 清空持倉"):
+        with engine.connect() as conn:
+            conn.execute(text("DELETE FROM portfolio;"))
+            conn.commit()
+        st.success("持倉已歸零。")
