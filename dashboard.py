@@ -9,7 +9,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 
-# ================= 1. 系統地基 (自動都更與編碼鎖死) =================
+# ================= 1. 系統地基 (自動都更、編碼鎖死、欄位補齊) =================
 try:
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
     engine = create_engine(
@@ -35,23 +35,32 @@ try:
                 PRIMARY KEY (ticker, scan_date)
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
         """))
-        # B. 鋼鐵都更：自動補齊欄位
-        s_cols = [r[0] for r in conn.execute(text("SHOW COLUMNS FROM daily_scans")).fetchall()]
-        cols_to_add = [('roe','FLOAT'), ('rev_growth','FLOAT'), ('fund_count','INT'), ('high_20','FLOAT'), ('vol_20','FLOAT'), ('bb_width','FLOAT')]
-        for col, dtype in cols_to_add:
-            if col not in s_cols: conn.execute(text(f"ALTER TABLE daily_scans ADD COLUMN {col} {dtype};"))
+
+        # B. 🔥 強力都更 3.0：補齊缺失欄位 (解決 line 158 報錯關鍵)
+        # 1. 檢查 stock_pool
+        pool_cols = [r[0] for r in conn.execute(text("SHOW COLUMNS FROM stock_pool")).fetchall()]
+        if 'fund_count' not in pool_cols:
+            conn.execute(text("ALTER TABLE stock_pool ADD COLUMN fund_count INT DEFAULT 0;"))
+        
+        # 2. 檢查 daily_scans
+        scan_cols = [r[0] for r in conn.execute(text("SHOW COLUMNS FROM daily_scans")).fetchall()]
+        cols_to_sync = [('roe','FLOAT'), ('rev_growth','FLOAT'), ('fund_count','INT'), ('high_20','FLOAT'), ('vol_20','FLOAT'), ('bb_width','FLOAT')]
+        for col, dtype in cols_to_sync:
+            if col not in scan_cols:
+                conn.execute(text(f"ALTER TABLE daily_scans ADD COLUMN {col} {dtype};"))
+        
         conn.commit()
 except Exception as e:
-    st.error(f"❌ 地基崩潰：{e}"); st.stop()
+    st.error(f"❌ 系統地基崩潰：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (全能抓取與指標計算) =================
+# ================= 2. 核心大腦 (全能抓取與超級指標計算) =================
 def get_fund_count_sim(ticker):
-    """💎 哲哲基金數據模擬"""
+    """💎 哲哲基金數據模擬與權重"""
     code = ticker.split('.')[0]
-    return np.random.randint(60, 180) if int(code[:2]) in [23, 35, 64] else np.random.randint(5, 90)
+    return np.random.randint(60, 185) if int(code[:2]) in [23, 35, 64, 30, 31] else np.random.randint(5, 95)
 
 def fetch_full_stock_package(ticker, name):
-    """💎 哲哲全能套件：11 大技術指標 + 基本面"""
+    """💎 哲哲全能套件：技術面 + 基本面強攻"""
     targets = [ticker, ticker.replace(".TW", ".TWO") if ".TW" in ticker else ticker.replace(".TWO", ".TW")]
     for t in targets:
         try:
@@ -80,7 +89,7 @@ def fetch_full_stock_package(ticker, name):
         except: continue
     return None
 
-# ================= 3. 視覺美學 (加大數字、LINE 戰報) =================
+# ================= 3. 視覺美學 (數字加大、LINE 戰報) =================
 def send_line_report(title, df, icon):
     if df.empty: return
     temp = df.copy()
@@ -107,22 +116,21 @@ def style_df(df):
 st.markdown("""<style>.big-font { font-size:48px !important; font-weight: bold; color: #FF3333; text-shadow: 2px 2px 4px #eee; }
 .medium-font { font-size:26px !important; font-weight: bold; color: #333; }</style>""", unsafe_allow_html=True)
 
-# ================= 4. 主介面設計 (V77.0 完全體) =================
-st.set_page_config(page_title="哲哲戰情室 V77.0", layout="wide")
-st.title("🛡️ 哲哲量化戰情室 V77.0 — 型別避險與七大金剛")
+# ================= 4. 主介面設計 (V78.0 鋼鐵版) =================
+st.set_page_config(page_title="哲哲戰情室 V78.0", layout="wide")
+st.title("🛡️ 哲哲量化戰情室 V78.0 — 鋼鐵地基都更版")
 
 tab1, tab2, tab3 = st.tabs(["🚀 核心策略掃描中心", "💼 資產即時戰報", "🛠️ 後台管理中心"])
 
 # --- Tab 1: 買股策略 ---
 with tab1:
-    st.markdown("### 🏆 每日行情智慧掃描")
+    st.markdown("### 🏆 每日全市場掃描 (透明診斷版)")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("📡 讀取今日快取數據", use_container_width=True):
             query = text("SELECT * FROM daily_scans WHERE scan_date = :today")
             db_df = pd.read_sql(query, con=engine, params={"today": datetime.now().date()})
             if not db_df.empty: 
-                # 解決 SQL 欄位映射
                 st.session_state['master_df'] = db_df.rename(columns={'change_pct': '漲跌(%)', 'price':'現價', 'ticker':'代號', 'stock_name':'名稱', 'rsi':'RSI'})
                 st.success(f"✅ 載入成功！共 {len(db_df)} 筆。")
     with c2:
@@ -145,11 +153,11 @@ with tab1:
                     status_scan.update(label=f"✨ 市場掃描完成！共處理 {len(res)} 筆。", state="complete")
 
     st.divider()
-    st.markdown("### 🛠️ 買股必勝決策中心 (七大金剛)")
+    st.markdown("### 🛠️ 買股必勝決策中心 (七大金剛策略)")
     if 'master_df' in st.session_state:
         df = st.session_state['master_df'].copy()
         
-        # 💎 關鍵修復：計算前強制轉為數字，防止 TypeError
+        # 💎 關鍵修復：計算前強制轉為數字，防止型別報錯
         calc_cols = ['現價', 'high_20', 'vol', 'vol_20', 'sma5', 'ma20', 'ma60', 'kd20', 'kd60', 'bbu', 'bb_width', 'roe', 'rev_growth']
         for col in calc_cols:
             if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -169,7 +177,7 @@ with tab1:
                 send_line_report("超級策略", res, "💎")
             else: st.warning("💡 目前尚無符合超級條件標的。")
 
-        # 2-4. 形態策略 (修正處：加上 na_rep 避險)
+        # 2-4. 形態策略
         st.markdown("#### 🔹 形態還原策略")
         c3, c4, c5 = st.columns(3)
         if c3.button("📈 帶量突破前高 (圖一)", use_container_width=True):
@@ -182,7 +190,7 @@ with tab1:
             res = df[(df['現價'] > df['bbu']) & (df['bb_width'] < 0.15)]
             st.dataframe(style_df(res)); send_line_report("布林突破", res, "🌀")
 
-        # 5-7. 經典策略
+        # 5-7. 經典策略 (九成ATM歸位)
         st.markdown("#### 🔸 經典至尊策略")
         c6, c7, c8 = st.columns(3)
         if c6.button("👑 九成勝率 ATM", use_container_width=True):
@@ -211,30 +219,26 @@ with tab2:
                 with engine.begin() as conn:
                     for r in all_res: conn.execute(text("DELETE FROM daily_scans WHERE ticker = :t AND scan_date = :d"), {"t": r['ticker'], "d": r['scan_date']})
                 pd.DataFrame(all_res).to_sql('daily_scans', con=engine, if_exists='append', index=False)
-            st.session_state['rt_p_v77'] = p_map
-            st.session_state['last_upd'] = datetime.now().strftime('%H:%M:%S')
+            st.session_state['rt_p_v78'] = p_map
             st.rerun()
 
-        if 'rt_p_v77' in st.session_state:
-            df_p['現價'] = df_p['ticker'].map(st.session_state['rt_p_v77'])
+        if 'rt_p_v78' in st.session_state:
+            df_p['現價'] = df_p['ticker'].map(st.session_state['rt_p_v78'])
             for col in ['entry_price', '現價', 'qty']: df_p[col] = pd.to_numeric(df_p[col], errors='coerce')
             df_p['獲利'] = (df_p['現價'] - df_p['entry_price']) * df_p['qty']
             df_p['報酬率(%)'] = ((df_p['現價'] - df_p['entry_price']) / df_p['entry_price']) * 100
-            
             total_profit = df_p['獲利'].fillna(0).sum()
-            st.markdown(f"<p class='medium-font'>當前預估實質總獲利：</p><p class='big-font'>${total_profit:,.0f}</p>", unsafe_allow_html=True)
-            st.caption(f"🕒 更新時間：{st.session_state.get('last_upd', 'N/A')}")
+            st.markdown(f"當前預估實質總獲利：<p class='big-font'>${total_profit:,.0f}</p>", unsafe_allow_html=True)
             st.dataframe(style_df(df_p))
             
         st.divider()
-        st.markdown("### 🎯 五大必勝賣股決策 (LINE 戰報)")
+        st.markdown("### 🎯 五大必勝賣股決策 (LINE 全線噴發)")
         m_cols = st.columns(5)
         s_btns = [("均線死叉", "💀"), ("RSI 過熱", "🔥"), ("利潤止盈", "💰"), ("破位停損", "📉"), ("跌破月線", "⚠️")]
         for i, (name, icon) in enumerate(s_btns):
             if m_cols[i].button(f"{icon} {name}", use_container_width=True):
                 scans_df = pd.read_sql(text("SELECT * FROM daily_scans WHERE scan_date = :today"), con=engine, params={"today": datetime.now().date()})
                 if not scans_df.empty:
-                    # 強制轉數值
                     for c in ['sma5', 'ma20', 'rsi', 'price']: scans_df[c] = pd.to_numeric(scans_df[c], errors='coerce')
                     check_df = pd.merge(df_p, scans_df, on='ticker', how='left')
                     masks = [check_df['sma5'] < check_df['ma20'], check_df['rsi'] > 80, check_df['報酬率(%)'] > 20, check_df['報酬率(%)'] < -10, check_df['price'] < check_df['ma20']]
@@ -246,7 +250,7 @@ with tab2:
 
 # --- Tab 3: 後台 ---
 with tab3:
-    st.subheader("🛠️ 數據都更中心 (智慧 Upsert 版)")
+    st.subheader("🛠️ 數據都更中心 (鋼鐵 Upsert 版)")
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### 📋 股票池管理")
@@ -267,4 +271,4 @@ with tab3:
                 for t in df['ticker'].tolist(): conn.execute(text("DELETE FROM portfolio WHERE ticker = :t"), {"t": t})
             df.to_sql('portfolio', con=engine, if_exists='append', index=False); st.success("成功！")
 
-st.caption("本系統由哲哲團隊開發。七大買股金剛歸位，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。鋼鐵地基都更版，賺到流湯不要忘了我！")
