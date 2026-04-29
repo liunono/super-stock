@@ -1,8 +1,11 @@
 streamlit
 pandas
-pymysql
 sqlalchemy
+PyMySQL
 yfinance
 pandas_ta
-cryptography
-matplotlib
+requests
+easyocr
+opencv-python-headless
+Pillow
+numpy
