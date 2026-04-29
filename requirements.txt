@@ -5,3 +5,4 @@ sqlalchemy
 yfinance
 pandas_ta
 cryptography
+matplotlib
