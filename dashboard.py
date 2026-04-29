@@ -36,7 +36,7 @@ try:
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
         """))
 
-        # B. 🔥 強力都更 3.0：補齊缺失欄位 (解決 line 158 報錯關鍵)
+        # B. 🔥 強力都更：補齊缺失欄位，徹底解決 DatabaseError
         # 1. 檢查 stock_pool
         pool_cols = [r[0] for r in conn.execute(text("SHOW COLUMNS FROM stock_pool")).fetchall()]
         if 'fund_count' not in pool_cols:
@@ -99,7 +99,7 @@ def send_line_report(title, df, icon):
     msg = f"{icon}【哲哲戰報 - {title}】\n📅 {datetime.now().strftime('%H:%M')}\n🎯 符合標的：\n"
     for _, r in temp.iterrows():
         msg += f"✅ {r.get(t_col,'')} {r.get(n_col,'')} | 現價:{r.get(p_col,'')}\n"
-    msg += "\n跟我預測的一模一樣，賺到流湯！🚀"
+    msg += "\n跟我預測的一模一樣，準備賺到流湯！🚀"
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps({"to": USER_ID, "messages": [{"type": "text", "text": msg}]}))
     except: pass
@@ -116,21 +116,22 @@ def style_df(df):
 st.markdown("""<style>.big-font { font-size:48px !important; font-weight: bold; color: #FF3333; text-shadow: 2px 2px 4px #eee; }
 .medium-font { font-size:26px !important; font-weight: bold; color: #333; }</style>""", unsafe_allow_html=True)
 
-# ================= 4. 主介面設計 (V78.0 鋼鐵版) =================
-st.set_page_config(page_title="哲哲戰情室 V78.0", layout="wide")
-st.title("🛡️ 哲哲量化戰情室 V78.0 — 鋼鐵地基都更版")
+# ================= 4. 主介面設計 (V79.0 完全體) =================
+st.set_page_config(page_title="哲哲戰情室 V79.0", layout="wide")
+st.title("🛡️ 哲哲量化戰情室 V79.0 — 解決 KeyError 與全能大滿貫")
 
-tab1, tab2, tab3 = st.tabs(["🚀 核心策略掃描中心", "💼 資產即時戰報", "🛠️ 後台管理中心"])
+tab1, tab2, tab3 = st.tabs(["🚀 買股策略掃描中心", "💼 資產即時戰報", "🛠️ 後台管理中心"])
 
 # --- Tab 1: 買股策略 ---
 with tab1:
-    st.markdown("### 🏆 每日全市場掃描 (透明診斷版)")
+    st.markdown("### 🏆 每日行情掃描 (數據對齊版)")
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("📡 讀取今日快取數據", use_container_width=True):
+        if st.button("📡 讀取今日行情數據", use_container_width=True):
             query = text("SELECT * FROM daily_scans WHERE scan_date = :today")
             db_df = pd.read_sql(query, con=engine, params={"today": datetime.now().date()})
             if not db_df.empty: 
+                # 💎 數據歸一化
                 st.session_state['master_df'] = db_df.rename(columns={'change_pct': '漲跌(%)', 'price':'現價', 'ticker':'代號', 'stock_name':'名稱', 'rsi':'RSI'})
                 st.success(f"✅ 載入成功！共 {len(db_df)} 筆。")
     with c2:
@@ -153,29 +154,34 @@ with tab1:
                     status_scan.update(label=f"✨ 市場掃描完成！共處理 {len(res)} 筆。", state="complete")
 
     st.divider()
-    st.markdown("### 🛠️ 買股必勝決策中心 (七大金剛策略)")
+    st.markdown("### 🛠️ 買股必勝決策中心 (七大金剛)")
     if 'master_df' in st.session_state:
+        # 💎 關鍵修復處：合併前先清除 master_df 中可能存在的衝突欄位
         df = st.session_state['master_df'].copy()
+        if 'fund_count' in df.columns: df = df.drop(columns=['fund_count'])
+        if 'sector' in df.columns: df = df.drop(columns=['sector'])
         
-        # 💎 關鍵修復：計算前強制轉為數字，防止型別報錯
+        # 強制轉為數字，防止型別報錯
         calc_cols = ['現價', 'high_20', 'vol', 'vol_20', 'sma5', 'ma20', 'ma60', 'kd20', 'kd60', 'bbu', 'bb_width', 'roe', 'rev_growth']
         for col in calc_cols:
             if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # 數據預處理：計算同業趨勢
+        # 數據合併：對齊 Sector 與 Fund Count
         sector_info = pd.read_sql("SELECT ticker, sector, fund_count FROM stock_pool", con=engine)
         df = pd.merge(df, sector_info, left_on='代號', right_on='ticker', how='left')
+        
+        # 計算同業 20 日平均漲幅
         df['20日漲幅'] = (df['現價'] - df['kd20']) / df['kd20']
         sector_avg = df.groupby('sector')['20日漲幅'].transform('mean')
 
-        # 1. 超級策略
-        if st.button("💎 降臨：超級策略 (法人+ROE+營收+趨勢)", use_container_width=True):
+        # 1. 超級策略 (對齊 fund_count 名稱)
+        if st.button("💎 降臨：超級策略 (法人+ROE+營營+趨勢)", use_container_width=True):
             mask = (df['fund_count'] >= 100) & (df['roe'] > 0.1) & (df['20日漲幅'] > sector_avg) & (df['rev_growth'] > 0.1)
             res = df[mask].sort_values(by='fund_count', ascending=False)
             if not res.empty:
                 st.dataframe(style_df(res[['代號', '名稱', '現價', '漲跌(%)', 'roe', 'rev_growth', 'fund_count']]))
                 send_line_report("超級策略", res, "💎")
-            else: st.warning("💡 目前尚無符合超級條件標的。")
+            else: st.warning("💡 目前尚無符合頂級條件標的。")
 
         # 2-4. 形態策略
         st.markdown("#### 🔹 形態還原策略")
@@ -190,7 +196,7 @@ with tab1:
             res = df[(df['現價'] > df['bbu']) & (df['bb_width'] < 0.15)]
             st.dataframe(style_df(res)); send_line_report("布林突破", res, "🌀")
 
-        # 5-7. 經典策略 (九成ATM歸位)
+        # 5-7. 經典策略
         st.markdown("#### 🔸 經典至尊策略")
         c6, c7, c8 = st.columns(3)
         if c6.button("👑 九成勝率 ATM", use_container_width=True):
@@ -219,11 +225,11 @@ with tab2:
                 with engine.begin() as conn:
                     for r in all_res: conn.execute(text("DELETE FROM daily_scans WHERE ticker = :t AND scan_date = :d"), {"t": r['ticker'], "d": r['scan_date']})
                 pd.DataFrame(all_res).to_sql('daily_scans', con=engine, if_exists='append', index=False)
-            st.session_state['rt_p_v78'] = p_map
+            st.session_state['rt_p_v79'] = p_map
             st.rerun()
 
-        if 'rt_p_v78' in st.session_state:
-            df_p['現價'] = df_p['ticker'].map(st.session_state['rt_p_v78'])
+        if 'rt_p_v79' in st.session_state:
+            df_p['現價'] = df_p['ticker'].map(st.session_state['rt_p_v79'])
             for col in ['entry_price', '現價', 'qty']: df_p[col] = pd.to_numeric(df_p[col], errors='coerce')
             df_p['獲利'] = (df_p['現價'] - df_p['entry_price']) * df_p['qty']
             df_p['報酬率(%)'] = ((df_p['現價'] - df_p['entry_price']) / df_p['entry_price']) * 100
@@ -246,7 +252,7 @@ with tab2:
                     if not res.empty:
                         disp = res[['stock_name_x', 'ticker', 'price', '報酬率(%)']].rename(columns={'stock_name_x':'名稱', 'price':'現價'})
                         st.dataframe(style_df(disp)); send_line_report(f"賣訊：{name}", disp, icon)
-                    else: st.success("✅ 持倉安全")
+                    else: st.success("✅ 持倉目前安全")
 
 # --- Tab 3: 後台 ---
 with tab3:
@@ -268,7 +274,7 @@ with tab3:
         if f2 and st.button("💾 鋼鐵存入"):
             df = pd.read_csv(f2, encoding='utf-8-sig'); df.columns = [c.lower() for c in df.columns]
             with engine.begin() as conn:
-                for t in df['ticker'].tolist(): conn.execute(text("DELETE FROM portfolio WHERE ticker = :t"), {"t": t})
+                for t in df['ticker'].tolist(): conn.execute(text("DELETE FROM portfolio WHERE ticker IN :t_list"), {"t_list": [t]})
             df.to_sql('portfolio', con=engine, if_exists='append', index=False); st.success("成功！")
 
-st.caption("本系統由哲哲團隊開發。鋼鐵地基都更版，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。鋼鐵校準版，賺到流湯不要忘了我！")
