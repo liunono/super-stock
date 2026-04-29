@@ -4,6 +4,9 @@ from sqlalchemy import create_engine, text
 import yfinance as yf
 import pandas_ta as ta
 import time, random, requests, json
+import numpy as np
+from PIL import Image
+import easyocr
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -35,7 +38,12 @@ try:
 except Exception as e:
     st.error(f"❌ 系統啟動失敗：{e}"); st.stop()
 
-# ================= 2. 哲哲美學：LINE 發送與完整樣式渲染 =================
+# ================= 2. 哲哲美學：視覺與 LINE 渲染 =================
+@st.cache_resource
+def get_ocr_reader():
+    """初始化 EasyOCR，支援繁中與英文"""
+    return easyocr.Reader(['ch_tra', 'en'])
+
 def send_line_report(title, df, icon):
     """將策略結果精美地噴向 LINE"""
     if df.empty:
@@ -51,7 +59,7 @@ def send_line_report(title, df, icon):
     requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps(payload))
 
 def style_df(df):
-    """美化 DataFrame 顯示 - 終極視覺強化版"""
+    """美化 DataFrame 顯示"""
     def color_rsi(val):
         if val >= 70: color = '#FFCCCC' # 過熱紅
         elif val >= 55: color = '#FFE5E5' # 偏高粉
@@ -64,19 +72,16 @@ def style_df(df):
         '獲利': '{:,.0f}', '報酬率(%)': '{:+.2f}%', 'entry_price': '{:.2f}',
         'SMA5': '{:.2f}', 'MA20': '{:.2f}', '量比': '{:.2f}'
     }
-    
     styler = df.style.format({k: v for k, v in format_dict.items() if k in df.columns})
-    
     if '漲跌(%)' in df.columns:
         styler = styler.map(lambda x: 'color: red; font-weight: bold' if isinstance(x, (int, float)) and x > 0 else 'color: green', subset=['漲跌(%)'])
     if '報酬率(%)' in df.columns:
         styler = styler.map(lambda x: 'color: red; font-weight: bold' if isinstance(x, (int, float)) and x > 0 else 'color: green', subset=['報酬率(%)'])
     if 'RSI' in df.columns:
         styler = styler.map(color_rsi, subset=['RSI'])
-    
     return styler
 
-# ================= 3. 核心抓取引擎 (多核心加速) =================
+# ================= 3. 核心引擎 (抓取與 AI 辨識) =================
 def fetch_data(ticker, name):
     for cur_ticker in [ticker, ticker.replace(".TW", ".TWO") if ".TW" in ticker else ticker.replace(".TWO", ".TW")]:
         try:
@@ -100,12 +105,54 @@ def fetch_data(ticker, name):
         except: continue
     return None
 
-# ================= 4. 介面設計 (整合 90% 勝率策略) =================
+def process_portfolio_images(uploaded_files):
+    """AI 視覺辨識庫存截圖邏輯"""
+    reader = get_ocr_reader()
+    extracted_data = []
+    
+    # 建立股票池名稱映射 (建議從資料庫動態讀取，這裡先做示範)
+    try:
+        pool_df = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
+        name_map = dict(zip(pool_df['stock_name'], pool_df['ticker']))
+    except:
+        name_map = {"全新": "2455.TW", "牧德": "3563.TW", "辛耘": "3583.TW", "聯亞": "3081.TWO", "上詮": "3363.TWO", "昇達科": "3491.TWO", "華星光": "4979.TWO", "群聯": "8299.TWO"}
+
+    for uploaded_file in uploaded_files:
+        image = Image.open(uploaded_file)
+        result = reader.readtext(np.array(image))
+        all_text = [res[1] for res in result]
+        
+        # 遍歷文字列表，尋找名稱與其對應的數值
+        for i, text in enumerate(all_text):
+            clean_name = text.strip()
+            if clean_name in name_map:
+                try:
+                    # 根據一般券商截圖佈局，通常數值會緊隨其後
+                    # 搜尋接下來的 5 個欄位找數字
+                    found_vals = []
+                    for offset in range(1, 6):
+                        val_str = all_text[i+offset].replace(',', '')
+                        if val_str.replace('.', '').isdigit():
+                            found_vals.append(float(val_str))
+                    
+                    if len(found_vals) >= 2:
+                        extracted_data.append({
+                            "ticker": name_map[clean_name],
+                            "stock_name": clean_name,
+                            "entry_price": found_vals[1], # 通常第二個數字是成本均價
+                            "qty": found_vals[2] / 1000 if found_vals[2] >= 100 else found_vals[2] # 張數轉換
+                        })
+                except: continue
+    
+    return pd.DataFrame(extracted_data).drop_duplicates(subset=['ticker', 'entry_price'])
+
+# ================= 4. 介面設計 (九成勝率策略整合) =================
 st.set_page_config(page_title="哲哲戰情室 V23.0", layout="wide")
 st.title("🛡️ 哲哲量化戰情室 V23.0 - 九成勝率冠軍版")
 
 tab1, tab2, tab3 = st.tabs(["🚀 核心策略掃描", "💼 持倉獲利監控", "🛠️ 後台管理"])
 
+# --- Tab 1: 策略掃描 ---
 with tab1:
     c_btn1, c_btn2 = st.columns(2)
     with c_btn1:
@@ -139,19 +186,17 @@ with tab1:
     if 'master_df' in st.session_state:
         st.divider()
         m_df = st.session_state['master_df'].copy()
-        
-        # 額外計算量能比
         m_df['量比'] = m_df['成交量'] / m_df['均量']
         
         st.markdown("### 🛠️ 策略決策中心 (九成勝率濾網已實裝)")
         btn_cols = st.columns(6)
         
-        # 👑 九成勝率核心邏輯
+        # 👑 九成勝率邏輯 (收盤價 > 20日扣抵 & 60日扣抵)
         win_90_mask = (
-            (m_df['現價'] > m_df['KD20']) & (m_df['現價'] > m_df['KD60']) & # 扣三低
-            (m_df['量比'] >= 1.5) &                                       # 量能噴發
-            (m_df['現價'] > m_df['SMA5']) & (m_df['SMA5'] > m_df['MA20']) & # 三軍齊發 (多頭排列)
-            (m_df['RSI'] >= 50) & (m_df['RSI'] <= 75)                      # 起漲位
+            (m_df['現價'] > m_df['KD20']) & (m_df['現價'] > m_df['KD60']) &
+            (m_df['量比'] >= 1.5) &
+            (m_df['現價'] > m_df['SMA5']) & (m_df['SMA5'] > m_df['MA20']) &
+            (m_df['RSI'] >= 50) & (m_df['RSI'] <= 75)
         )
 
         strats = [
@@ -173,9 +218,8 @@ with tab1:
                     m3.metric("平均漲跌", f"{res_df['漲跌(%)'].mean():.2f}%")
                 st.dataframe(style_df(res_df), width=1200)
                 send_line_report(name, res_df, icon)
-                st.toast(f"戰報已噴發到 LINE！", icon="📩")
 
-# --- Tab 2: 持倉與獲利 (完整保留) ---
+# --- Tab 2: 持倉監控 ---
 with tab2:
     st.header("💼 我的資產亮牌區")
     if 'master_df' in st.session_state:
@@ -190,16 +234,38 @@ with tab2:
         else: st.info("目前尚無持倉數據。")
     else: st.warning("請先讀取今日數據。")
 
-# --- Tab 3: 後台管理 (完整保留) ---
+# --- Tab 3: 後台都更管理 ---
 with tab3:
+    st.subheader("🤖 AI 視覺庫存導入 (新功能)")
+    up_images = st.file_uploader("📥 直接上傳庫存截圖 (可多張，重複自動過濾)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+    if up_images and st.button("🚀 啟動 AI 辨識並同步後台", use_container_width=True):
+        with st.spinner("哲哲正在辨識鑽石股..."):
+            df_ocr = process_portfolio_images(up_images)
+            if not df_ocr.empty:
+                with engine.begin() as conn:
+                    # 去重寫入：比對已存在的 ticker + entry_price
+                    existing = pd.read_sql("SELECT ticker, entry_price FROM portfolio", con=conn)
+                    # 邏輯過濾：排除 ticker 且 entry_price 都一樣的
+                    to_add = df_ocr[~df_ocr.set_index(['ticker','entry_price']).index.isin(existing.set_index(['ticker','entry_price']).index)]
+                    if not to_add.empty:
+                        to_add.to_sql('portfolio', con=conn, if_exists='append', index=False)
+                        st.success(f"✅ 成功導入 {len(to_add)} 筆新數據！")
+                        st.dataframe(to_add)
+                    else: st.info("截圖內容均已存在，無須重複更新。")
+            else: st.error("辨識失敗，請檢查截圖內容。")
+
+    st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("📋 股票池管理")
+        st.subheader("📋 股票池 CSV 匯入")
         f_pool = st.file_uploader("上傳股票池 CSV", type="csv")
-        if f_pool and st.button("💾 匯入股票池", use_container_width=True):
-            pd.read_csv(f_pool).to_sql('stock_pool', con=engine, if_exists='append', index=False); st.success("成功匯入股票池")
+        if f_pool and st.button("💾 執行股票池都更", use_container_width=True):
+            pd.read_csv(f_pool).to_sql('stock_pool', con=engine, if_exists='append', index=False); st.success("成功匯入")
     with c2:
-        st.subheader("💰 持倉管理")
+        st.subheader("💰 手動持倉 CSV 匯入")
         f_port = st.file_uploader("上傳持倉 CSV", type="csv")
-        if f_port and st.button("💾 存入持倉", use_container_width=True):
-            pd.read_csv(f_port).to_sql('portfolio', con=engine, if_exists='append', index=False); st.success("成功存入持倉")
+        if f_port and st.button("💾 執行持倉存儲", use_container_width=True):
+            pd.read_csv(f_port).to_sql('portfolio', con=engine, if_exists='append', index=False); st.success("成功存入")
+
+# 頁尾免責
+st.caption("本分析僅供參考，實際進出請以券商軟體即時報價為準，投資有風險！")
