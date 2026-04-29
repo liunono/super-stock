@@ -45,10 +45,23 @@ def send_line_report(title, df, icon):
     requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps(payload))
 
 def style_df(df):
-    """美化 DataFrame 顯示"""
-    return df.style.format({'現價': '{:.2f}', '漲跌(%)': '{:+.2f}%', 'RSI': '{:.1f}'})\
-                   .map(lambda x: 'color: red; font-weight: bold' if isinstance(x, (int, float)) and x > 0 else 'color: green', subset=['漲跌(%)'])\
-                   .background_gradient(subset=['RSI'], cmap='RdYlGn_r')
+    """美化 DataFrame 顯示 - 輕量化無套件版"""
+    def color_rsi(val):
+        # 手動定義 RSI 的位階顏色
+        if val >= 70: color = '#FFCCCC' # 過熱紅
+        elif val >= 55: color = '#FFE5E5' # 偏高粉
+        elif val <= 30: color = '#CCFFCC' # 超跌綠
+        else: color = 'transparent'
+        return f'background-color: {color}'
+
+    # 處理數字格式與漲跌顏色
+    styler = df.style.format({'現價': '{:.2f}', '漲跌(%)': '{:+.2f}%', 'RSI': '{:.1f}'})
+    
+    # 漲跌用文字顏色，RSI 用背景顏色
+    styler = styler.map(lambda x: 'color: red; font-weight: bold' if isinstance(x, (int, float)) and x > 0 else 'color: green', subset=['漲跌(%)'])
+    styler = styler.map(color_rsi, subset=['RSI'])
+    
+    return styler
 
 # ================= 3. 核心抓取引擎 (10核心並行) =================
 def fetch_data(ticker, name):
