@@ -8,7 +8,7 @@ import requests, json, time, io, re, random
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ================= 1. 系統地基 (鋼鐵都更，永不數位違約) =================
+# ================= 1. 系統地基 (鋼鐵都更，防護鎖死) =================
 try:
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
     engine = create_engine(DB_URL, connect_args={"charset": "utf8mb4", "connect_timeout": 30}, pool_pre_ping=True)
@@ -16,7 +16,7 @@ try:
     
     with engine.connect() as conn:
         conn.execute(text("SET NAMES utf8mb4;"))
-        # A. 建立核心表格
+        # A. 核心表格
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS daily_scans (
                 ticker VARCHAR(20), stock_name VARCHAR(50), price FLOAT, change_pct FLOAT, 
@@ -34,19 +34,23 @@ try:
             if col not in s_cols: conn.execute(text(f"ALTER TABLE daily_scans ADD COLUMN {col} {dtype};"))
         conn.commit()
 except Exception as e:
-    st.error(f"❌ 地基損毀：{e}"); st.stop()
+    st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (高效智慧抓取引擎) =================
+# ================= 2. 核心大腦 (佛系溫柔抓取引擎) =================
 
 def fetch_full_stock_package(ticker, name):
-    """💎 哲哲經典高效抓取：隨機延遲 0.3~0.8s 避雷版"""
-    time.sleep(random.uniform(0.3, 0.8))
+    """💎 哲哲佛系抓取：1.0~2.5s 隨機延遲，絕不暴力"""
+    # 💎 增加基礎延遲，模仿真人在慢速看盤
+    time.sleep(random.uniform(1.0, 2.5))
+    
     try:
         s = yf.Ticker(ticker)
-        d = s.history(period="7mo", interval="1d", timeout=15)
+        d = s.history(period="7mo", interval="1d", timeout=25)
+        
+        # 備援路徑
         if d.empty or len(d) < 65:
             alt_t = ticker.replace(".TW", ".TWO") if ".TW" in ticker else ticker.replace(".TWO", ".TW")
-            d = yf.Ticker(alt_t).history(period="7mo", interval="1d", timeout=15)
+            d = yf.Ticker(alt_t).history(period="7mo", interval="1d", timeout=25)
             if d.empty or len(d) < 65: return None
         
         c, v = d['Close'], d['Volume']
@@ -74,31 +78,28 @@ def fetch_full_stock_package(ticker, name):
 
 def smart_homerun_scan(pool_df):
     """
-    🚀 哲哲全壘打引擎：
-    1. 帶有視覺化進度條。
-    2. 自動檢測失敗者並隨機洗牌重跑。
-    3. 直到 100% 完成為止。
+    🚀 哲哲佛系全壘打引擎：
+    1. 採用單線程，每一檔都穩如泰山。
+    2. 隨機洗牌，徹底混淆數位警衛。
+    3. 進度條實時同步。
     """
     all_results = []
     total_count = len(pool_df)
     remaining_pool = pool_df.copy()
     round_num = 1
     
-    # 建立視覺反饋區
     progress_bar = st.progress(0)
     status_msg = st.empty()
-    log_box = st.status("🚀 啟動全壘打掃描程序...", expanded=True)
+    log_box = st.status("🚀 啟動佛系全壘打程序 (進度 0%)...", expanded=True)
     
     while not remaining_pool.empty:
-        status_msg.markdown(f"**📍 第 {round_num} 輪強攻 | 剩餘 {len(remaining_pool)} 檔標的...**")
-        # 💎 洗牌，打亂警衛視線
+        status_msg.info(f"📍 目前正在執行第 {round_num} 輪回補 | 剩餘 {len(remaining_pool)} 檔")
+        # 💎 洗牌，打破下單規律
         batch_list = remaining_pool.sample(frac=1).to_dict('records')
         round_success = []
         
-        # 為了效率，第一輪並行 worker=3，之後回補用單線程
-        workers = 3 if round_num == 1 else 1
-        
-        with ThreadPoolExecutor(max_workers=workers) as ex:
+        # 💎 終極修正：將 max_workers 設為 1，改為純序列執行，最慢但也最穩
+        with ThreadPoolExecutor(max_workers=1) as ex:
             futures = {ex.submit(fetch_full_stock_package, r['ticker'], r['stock_name']): r['ticker'] for r in batch_list}
             for f in as_completed(futures):
                 data = f.result()
@@ -108,22 +109,22 @@ def smart_homerun_scan(pool_df):
                     # 更新進度條
                     progress = len(all_results) / total_count
                     progress_bar.progress(progress)
-                    log_box.write(f"✅ {len(all_results)}/{total_count} | {data['stock_name']} 滿血入庫")
+                    log_box.write(f"✅ {len(all_results)}/{total_count} | {data['stock_name']} 穩定入庫")
                 else:
-                    log_box.write(f"⚠️ {futures[f]} 被警衛攔截，等待回補")
+                    log_box.write(f"⚠️ {futures[f]} 被警衛擋下，留待回補")
         
-        # 更新剩餘清單
+        # 更新失敗名單
         success_tickers = [x['ticker'] for x in round_success]
         remaining_pool = remaining_pool[~remaining_pool['ticker'].isin(success_tickers)]
         
         if not remaining_pool.empty:
             round_num += 1
-            wait_time = 5 if round_num < 3 else 15
-            log_box.write(f"⏳ 休息 {wait_time} 秒後執行第 {round_num} 輪精準回補...")
+            wait_time = 10 + (round_num * 5) # 輪次越多，休息越久
+            log_box.write(f"⏳ 警衛盯很緊！休息 {wait_time} 秒後執行下一輪...")
             time.sleep(wait_time)
             
     progress_bar.progress(1.0)
-    status_msg.success(f"🏆 100% 全壘打達成！成功抓取 {total_count} 檔。")
+    status_msg.success(f"🏆 100% 全壘打！共抓取 {total_count} 檔。")
     log_box.update(label="✨ 所有數據已百分百歸位！", state="complete")
     return all_results
 
@@ -138,7 +139,7 @@ def send_line_report(title, df, icon):
     msg = f"{icon}【哲哲戰報 - {title}】\n📅 {datetime.now().strftime('%H:%M')}\n🎯 符合標的：\n"
     for _, r in temp.iterrows():
         msg += f"✅ {r.get(t_col,'')} {r.get(n_col,'')} | 現價:{r.get(p_col,'')}\n"
-    msg += "\n跟我預測的一模一樣，準備賺到流湯！🚀"
+    msg += "\n跟我預測的一模一樣，賺到流湯！🚀"
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps({"to": USER_ID, "messages": [{"type": "text", "text": msg}]}))
     except: pass
@@ -154,15 +155,15 @@ def style_df(df):
 
 st.markdown("""<style>.big-font { font-size:48px !important; font-weight: bold; color: #FF3333; text-shadow: 2px 2px 4px #eee; }</style>""", unsafe_allow_html=True)
 
-# ================= 4. 主介面設計 (V87.0 巔峰回補版) =================
-st.set_page_config(page_title="哲哲戰情室 V87.0", layout="wide")
-st.title("🛡️ 哲哲量化戰情室 V87.0 — 全壘打進度與回補系統")
+# ================= 4. 主介面設計 (V88.0 佛系版) =================
+st.set_page_config(page_title="哲哲戰情室 V88.0", layout="wide")
+st.title("🛡️ 哲哲量化戰情室 V88.0 — 佛系隱身與全壘打系統")
 
 tab1, tab2, tab3 = st.tabs(["🚀 核心策略掃描", "💼 資產即時戰報", "🛠️ 後台管理中心"])
 
 # --- Tab 1: 買股策略 ---
 with tab1:
-    st.markdown("### 🏆 每日行情智慧掃描 (進度條版)")
+    st.markdown("### 🏆 每日全市場掃描 (慢牛佛系版)")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("📡 讀取今日數據快取", use_container_width=True):
@@ -175,7 +176,7 @@ with tab1:
                 st.success(f"✅ 載入成功！共 {len(db_df)} 筆。")
             
     with c2:
-        if st.button("⚡ 啟動全壘打掃描 (100% 成功率保證)", use_container_width=True):
+        if st.button("⚡ 啟動佛系渦輪掃描 (保證 100% 成功)", use_container_width=True):
             pool = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
             if not pool.empty:
                 final_res = smart_homerun_scan(pool)
@@ -184,7 +185,7 @@ with tab1:
                     with engine.begin() as conn: conn.execute(text(f"DELETE FROM daily_scans WHERE scan_date = '{datetime.now().date()}'"))
                     m_df.to_sql('daily_scans', con=engine, if_exists='append', index=False)
                     st.session_state['master_df'] = m_df.rename(columns={'ticker':'代號','stock_name':'名稱','price':'現價','change_pct':'漲跌(%)','rsi':'RSI'})
-                    st.balloons(); st.success(f"✨ 任務達成！最終成功抓取 {len(final_res)}/{len(pool)} 筆數據！")
+                    st.balloons(); st.success(f"✨ 任務達成！成功抓取 {len(final_res)}/{len(pool)} 筆滿血數據！")
 
     st.divider()
     st.markdown("### 🛠️ 買股決策中心 (七大金剛)")
@@ -223,26 +224,26 @@ with tab1:
             res = df[(abs(df['現價']-df['ma20'])/df['ma20'].replace(0,1)<0.02)]
             st.dataframe(style_df(res)); send_line_report("強勢回測", res, "🎯")
 
-# --- Tab 2: 資產監控 (也加入全壘打回補) ---
+# --- Tab 2: 持倉監控 (佛系全壘打) ---
 with tab2:
     st.header("💼 我的資產即時戰報")
     df_p = pd.read_sql("SELECT p.ticker, COALESCE(s.stock_name, p.stock_name) as stock_name, p.entry_price, p.qty FROM portfolio p LEFT JOIN stock_pool s ON p.ticker = s.ticker", con=engine)
     if not df_p.empty:
-        if st.button("🔄 更新即時獲利 (全壘打回補版)", use_container_width=True):
+        if st.button("🔄 更新即時獲利 (佛系同步版)", use_container_width=True):
             final_p_res = smart_homerun_scan(df_p[['ticker','stock_name']])
             if final_p_res:
                 with engine.begin() as conn:
                     for r in final_p_res: conn.execute(text("DELETE FROM daily_scans WHERE ticker = :t AND scan_date = :d"), {"t": r['ticker'], "d": r['scan_date']})
                 pd.DataFrame(final_p_res).to_sql('daily_scans', con=engine, if_exists='append', index=False)
-                st.session_state['rt_p_v87'] = {x['ticker']: x['price'] for x in final_p_res}
+                st.session_state['rt_p_v88'] = {x['ticker']: x['price'] for x in final_p_res}
             st.rerun()
 
-        if 'rt_p_v87' in st.session_state:
-            df_p['現價'] = df_p['ticker'].map(st.session_state['rt_p_v87'])
+        if 'rt_p_v88' in st.session_state:
+            df_p['現價'] = df_p['ticker'].map(st.session_state['rt_p_v88'])
             for col in ['entry_price', '現價', 'qty']: df_p[col] = pd.to_numeric(df_p[col], errors='coerce').fillna(0)
             df_p['獲利'] = (df_p['現價'] - df_p['entry_price']) * df_p['qty']
             df_p['報酬率(%)'] = ((df_p['現價'] - df_p['entry_price']) / (df_p['entry_price'].replace(0, 1))) * 100
             st.markdown(f"當前總獲利：<p class='big-font'>${df_p['獲利'].sum():,.0f}</p>", unsafe_allow_html=True)
             st.dataframe(style_df(df_p))
 
-st.caption("本系統由哲哲團隊開發。全壘打回補版，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。佛系慢牛版，賺到流湯不要忘了我！")
