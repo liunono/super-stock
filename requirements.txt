@@ -1,11 +1,10 @@
-easyocr
 streamlit
 pandas
+yfinance
+pandas-ta
 sqlalchemy
 PyMySQL
-yfinance
-pandas_ta
+cryptography
 requests
-opencv-python-headless
-Pillow
 numpy
+beautifulsoup4
