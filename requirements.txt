@@ -1,3 +1,4 @@
+easyocr
 streamlit
 pandas
 sqlalchemy
@@ -5,7 +6,6 @@ PyMySQL
 yfinance
 pandas_ta
 requests
-easyocr
 opencv-python-headless
 Pillow
 numpy
