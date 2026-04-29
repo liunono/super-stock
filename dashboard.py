@@ -9,12 +9,12 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ================= 1. 系統地基 (強制解碼與資料庫都更) =================
+# 哲哲叮嚀：地基沒打穩，獲利變浮雲！自動修復 ???? 亂碼與 DatabaseError。
 try:
-    # 💎 核心修復：強制所有連線與參數使用 utf8mb4
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
     engine = create_engine(
         DB_URL, 
-        connect_args={"charset": "utf8mb4", "connect_timeout": 15},
+        connect_args={"charset": "utf8mb4", "connect_timeout": 20},
         pool_pre_ping=True,
         pool_recycle=3600
     )
@@ -23,7 +23,7 @@ try:
     
     with engine.connect() as conn:
         conn.execute(text("SET NAMES utf8mb4;"))
-        # A. 建立並鎖定編碼 (防止 ???? 亂碼)
+        # A. 建立並鎖定編碼 (防止中文字 ???? 亂碼)
         conn.execute(text("CREATE TABLE IF NOT EXISTS stock_pool (ticker VARCHAR(20) PRIMARY KEY, stock_name VARCHAR(50), sector VARCHAR(50)) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS portfolio (
@@ -48,21 +48,21 @@ try:
 except Exception as e:
     st.error(f"❌ 系統地基崩潰：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (數據抓取機制優化：拒絕 None 值) =================
+# ================= 2. 核心大腦 (數據抓取機制優化) =================
 def fetch_data(ticker, name):
-    """計算九成勝率關鍵指標，含失敗重試"""
-    # 嘗試不同的後綴，確保抓到數據
-    tickers_to_try = [ticker]
-    if ".TW" in ticker: tickers_to_try.append(ticker.replace(".TW", ".TWO"))
-    elif ".TWO" in ticker: tickers_to_try.append(ticker.replace(".TWO", ".TW"))
+    """計算九成勝率指標，支援 .TW 與 .TWO 自動切換"""
+    targets = [ticker]
+    if ".TW" in ticker: targets.append(ticker.replace(".TW", ".TWO"))
+    elif ".TWO" in ticker: targets.append(ticker.replace(".TWO", ".TW"))
 
-    for t in tickers_to_try:
+    for t in targets:
         try:
             s = yf.Ticker(t)
             d = s.history(period="7mo", interval="1d", timeout=10)
             if not d.empty and len(d) >= 65:
                 c, v = d['Close'], d['Volume']
-                sma5, ma20, rsi, bb = ta.sma(c, 5), ta.sma(c, 20), ta.rsi(c, 14), ta.bbands(c, 20, 2)
+                sma5, ma20 = ta.sma(c, 5), ta.sma(c, 20)
+                rsi, bb = ta.rsi(c, 14), ta.bbands(c, 20, 2)
                 return {
                     "ticker": ticker, "stock_name": name, "price": round(c.iloc[-1], 2),
                     "change_pct": round(((c.iloc[-1]-c.iloc[-2])/c.iloc[-2])*100, 2),
@@ -77,15 +77,27 @@ def fetch_data(ticker, name):
 
 # ================= 3. 哲哲美學工具 (視覺與 LINE 發送) =================
 def style_df(df):
+    """終極護盤美化：解決 TypeError 與 數值空缺"""
     def color_val(val):
         if isinstance(val, (int, float)):
             if val > 0: return 'color: #FF3333; font-weight: bold'
             if val < 0: return 'color: #00AA00'
         return ''
-    f_map = {'現價': '{:.2f}', '漲跌(%)': '{:+.2f}%', 'RSI': '{:.1f}', '獲利': '{:,.0f}', '報酬率(%)': '{:+.2f}%', 'entry_price': '{:.2f}', 'qty': '{:,.0f}'}
-    styler = df.style.format({k: v for k, v in f_map.items() if k in df.columns})
+    
+    # 💎 核心修復：使用 na_rep 防止格式化空值時報錯
+    f_map = {
+        '現價': '{:.2f}', '漲跌(%)': '{:+.2f}%', 'RSI': '{:.1f}', 
+        '獲利': '{:,.0f}', '報酬率(%)': '{:+.2f}%', 
+        'entry_price': '{:.2f}', 'qty': '{:,.0f}'
+    }
+    
+    # 確保列名正確
+    available_cols = [c for c in f_map.keys() if c in df.columns]
+    styler = df.style.format({k: v for k, v in f_map.items() if k in df.columns}, na_rep='-')
+    
     for col in ['報酬率(%)', '漲跌(%)', '獲利']:
-        if col in df.columns: styler = styler.map(color_val, subset=[col])
+        if col in df.columns:
+            styler = styler.map(color_val, subset=[col])
     return styler
 
 def send_line_report(title, df, icon):
@@ -98,9 +110,9 @@ def send_line_report(title, df, icon):
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps({"to": USER_ID, "messages": [{"type": "text", "text": msg}]}))
 
-# ================= 4. 主介面設計 (V58.0 巔峰完全體) =================
-st.set_page_config(page_title="哲哲戰情室 V58.0", layout="wide")
-st.title("🛡️ 哲哲量化戰情室 V58.0 — 終極數據強攻提款機")
+# ================= 4. 主介面設計 (V59.0 巔峰大滿貫) =================
+st.set_page_config(page_title="哲哲戰情室 V59.0", layout="wide")
+st.title("🛡️ 哲哲量化戰情室 V59.0 — 終極數據護盤提款機")
 
 tab1, tab2, tab3 = st.tabs(["🚀 核心買股策略掃描", "💼 資產獲利 & 賣出策略", "🛠️ 後台管理中心"])
 
@@ -153,29 +165,32 @@ with tab1:
                 send_line_report(name, df[mask], icon)
     else: st.info("💡 贏家提醒：請先載入行情數據。")
 
-# --- Tab 2: 資產 & 五大賣股按鈕 (暴力更新版) ---
+# --- Tab 2: 資產 & 五大賣股按鈕 (解決 TypeError 與更新沒反應) ---
 with tab2:
     st.header("💼 我的資產即時戰報")
-    df_p = pd.read_sql("SELECT p.ticker, COALESCE(s.stock_name, p.stock_name) as stock_name, p.entry_price, p.qty FROM portfolio p LEFT JOIN stock_pool s ON p.ticker = s.ticker", con=engine)
+    # 💎 解決亂碼：強制關聯 pool 抓正確繁體中文
+    df_p = pd.read_sql("""
+        SELECT p.ticker, COALESCE(s.stock_name, p.stock_name) as stock_name, p.entry_price, p.qty 
+        FROM portfolio p LEFT JOIN stock_pool s ON p.ticker = s.ticker
+    """, con=engine)
     
     if not df_p.empty:
-        # 💎 終極修正：按鈕加入明確反饋與強勢重試
-        if st.button("🔄 更新即時獲利 (強力強攻抓取)", use_container_width=True):
+        # 💎 修正：按鈕加入明確的反饋狀態
+        if st.button("🔄 更新即時獲利 (強力逐檔強攻掃描)", use_container_width=True):
             p_map = {}
             prog_bar = st.progress(0)
-            status_text = st.empty()
+            status = st.empty()
             
-            # 暴力逐檔下載
             tickers = df_p['ticker'].tolist()
             for idx, t in enumerate(tickers):
-                status_text.text(f"🚀 正在掃描第 {idx+1}/{len(tickers)} 檔：{t}")
+                status.text(f"🚀 正在強攻第 {idx+1}/{len(tickers)} 檔：{t}")
                 try:
-                    # 強制設定 1m 週期，保證最新
+                    # 強制設定 1d 1m，解決斷線問題
                     data = yf.download(t, period="1d", interval="1m", progress=False, timeout=10)
                     if not data.empty:
                         p_map[t] = data['Close'].iloc[-1]
                     else:
-                        # 二段式備援：換尾綴
+                        # 備援：換市場尾綴
                         alt_t = t.replace(".TW", ".TWO") if ".TW" in t else t.replace(".TWO", ".TW")
                         data_alt = yf.download(alt_t, period="1d", interval="1m", progress=False, timeout=10)
                         p_map[t] = data_alt['Close'].iloc[-1] if not data_alt.empty else np.nan
@@ -184,16 +199,18 @@ with tab2:
                 prog_bar.progress((idx + 1) / len(tickers))
             
             st.session_state['rt_p'] = p_map
-            status_text.text("✅ 即時獲利已百分百同步！")
-            st.toast("數據已歸位，跟我預測的一模一樣！", icon="🚀")
+            status.text("✅ 即時獲利同步大成功！")
+            st.toast("數值已全部歸位！", icon="🚀")
             time.sleep(1)
-            status_text.empty()
+            status.empty()
+            st.rerun() # 強制重刷頁面
         
         if 'rt_p' in st.session_state:
             df_p['現價'] = df_p['ticker'].map(st.session_state['rt_p'])
-            # 💎 排除 TypeError：強制數值化
+            
+            # 💎 徹底斬斷 TypeError：校對拼字並強制數值化
             df_p['entry_price'] = pd.to_numeric(df_p['entry_price'], errors='coerce')
-            df_p['现價'] = pd.to_numeric(df_p['現價'], errors='coerce')
+            df_p['現價'] = pd.to_numeric(df_p['現價'], errors='coerce')
             df_p['qty'] = pd.to_numeric(df_p['qty'], errors='coerce')
             
             df_p['獲利'] = (df_p['現價'] - df_p['entry_price']) * df_p['qty']
@@ -212,7 +229,7 @@ with tab2:
         for i, (name, icon) in enumerate(s_btns):
             if m_cols[i].button(f"{icon} {name}", use_container_width=True):
                 if 'master_df' in st.session_state and 'rt_p' in st.session_state:
-                    check_df = pd.merge(df_p, st.session_state['master_df'], left_on='ticker', right_on='代號', how='left')
+                    check_df = pd.merge(df_p, st.session_state['master_df'].rename(columns={'漲跌_pct': '漲跌(%)'}), left_on='ticker', right_on='代號', how='left')
                     p_col = '現價_x' if '現價_x' in check_df.columns else '現價'
                     masks = [
                         check_df['sma5'] < check_df['ma20'],
@@ -223,11 +240,11 @@ with tab2:
                     ]
                     res = check_df[masks[i]]
                     if not res.empty:
-                        st.error(f"🚨 符合『{name}』標的如下：")
+                        st.error(f"🚨 符合『{name}』標的：")
                         st.dataframe(style_df(res))
-                    else: st.success(f"✅ 持倉目前未觸發『{name}』策略！")
-                else: st.warning("💡 請先讀取行情並更新獲利。")
-    else: st.info("持倉為空。")
+                    else: st.success(f"✅ 持倉目前安全。")
+                else: st.warning("💡 請先執行掃描並更新獲利。")
+    else: st.info("目前持倉為空。")
 
 # --- Tab 3: 後台 ---
 with tab3:
@@ -238,11 +255,11 @@ with tab3:
         st.download_button("📥 下載範本", pd.DataFrame({'ticker':['2330.TW','3583.TW'],'stock_name':['台積電','辛耘'],'sector':['半導體','設備']}).to_csv(index=False).encode('utf-8-sig'), "pool.csv")
         f1 = st.file_uploader("上傳股票池 CSV", type="csv")
         if f1 and st.button("💾 匯入股票池"):
-            pd.read_csv(f1, encoding='utf-8-sig').to_sql('stock_pool', con=engine, if_exists='append', index=False); st.success("匯入成功！")
+            pd.read_csv(f1, encoding='utf-8-sig').to_sql('stock_pool', con=engine, if_exists='append', index=False); st.success("成功！")
     with c2:
         st.markdown("#### 持倉管理 (Portfolio)")
         st.download_button("📥 下載範本", pd.DataFrame({'ticker':['2330.TW'],'stock_name':['台積電'],'entry_price':[750],'qty':[1000]}).to_csv(index=False).encode('utf-8-sig'), "port.csv")
-        f2 = st.file_uploader("上傳持倉數據", type="csv")
+        f2 = st.file_uploader("上傳持倉", type="csv")
         if f2 and st.button("💾 存入持倉"):
             df_up = pd.read_csv(f2, encoding='utf-8-sig')
             with engine.begin() as conn:
@@ -251,4 +268,4 @@ with tab3:
                 df_up.to_sql('portfolio', con=conn, if_exists='append', index=False)
             st.success("成功！數據精準同步！")
 
-st.caption("本系統由哲哲冠軍團隊開發。數字會說話，不要忘了我！")
+st.caption("本系統由哲哲團隊開發。數字會說話，投資有風險，不要忘了我！")
