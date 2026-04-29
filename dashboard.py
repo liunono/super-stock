@@ -10,18 +10,15 @@ import easyocr
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ================= 1. 系統地基 (自動修復與資料庫連線) =================
+# ================= 1. 系統地基 (自動修復與都更) =================
 try:
-    # 增加 charset 支持防止中文亂碼，這是贏家的細節！
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
     engine = create_engine(DB_URL)
-    LINE_TOKEN = st.secrets["LINE_CHANNEL_ACCESS_TOKEN"]
-    USER_ID = st.secrets["YOUR_LINE_USER_ID"]
     
     with engine.connect() as conn:
-        # 確保核心表格存在 (股票池、持倉、每日掃描)
+        # 1. 確保基礎表格存在
         conn.execute(text("CREATE TABLE IF NOT EXISTS stock_pool (ticker VARCHAR(20) PRIMARY KEY, stock_name VARCHAR(50), sector VARCHAR(50));"))
-        conn.execute(text("CREATE TABLE IF NOT EXISTS portfolio (id INT AUTO_INCREMENT PRIMARY KEY, ticker VARCHAR(20), stock_name VARCHAR(50), entry_price FLOAT, qty FLOAT);"))
+        conn.execute(text("CREATE TABLE IF NOT EXISTS portfolio (id INT AUTO_INCREMENT PRIMARY KEY, ticker VARCHAR(20), entry_price FLOAT, qty FLOAT);"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS daily_scans (
                 ticker VARCHAR(20), stock_name VARCHAR(50), price FLOAT, change_pct FLOAT, 
@@ -29,10 +26,18 @@ try:
                 vol BIGINT, avg_vol BIGINT, scan_date DATE, PRIMARY KEY (ticker, scan_date)
             );
         """))
-        # 🔥 欄位自動檢查與補齊 (kd20, kd60 扣抵值)
-        existing_cols = [row[0] for row in conn.execute(text("SHOW COLUMNS FROM daily_scans")).fetchall()]
-        if 'kd20' not in existing_cols: conn.execute(text("ALTER TABLE daily_scans ADD COLUMN kd20 FLOAT;"))
-        if 'kd60' not in existing_cols: conn.execute(text("ALTER TABLE daily_scans ADD COLUMN kd60 FLOAT;"))
+
+        # 🔥 2. [關鍵都更] 自動補齊 portfolio 的 stock_name 欄位
+        portfolio_cols = [row[0] for row in conn.execute(text("SHOW COLUMNS FROM portfolio")).fetchall()]
+        if 'stock_name' not in portfolio_cols:
+            st.info("🔄 偵測到舊版表格，正在為 portfolio 執行欄位都更...")
+            conn.execute(text("ALTER TABLE portfolio ADD COLUMN stock_name VARCHAR(50) AFTER ticker;"))
+        
+        # 3. 自動補齊 daily_scans 的 kd20, kd60 欄位
+        scan_cols = [row[0] for row in conn.execute(text("SHOW COLUMNS FROM daily_scans")).fetchall()]
+        if 'kd20' not in scan_cols: conn.execute(text("ALTER TABLE daily_scans ADD COLUMN kd20 FLOAT;"))
+        if 'kd60' not in scan_cols: conn.execute(text("ALTER TABLE daily_scans ADD COLUMN kd60 FLOAT;"))
+        
         conn.commit()
 except Exception as e:
     st.error(f"❌ 系統啟動失敗：{e}"); st.stop()
