@@ -18,7 +18,7 @@ try:
     
     with engine.connect() as conn:
         conn.execute(text("SET NAMES utf8mb4;"))
-        # 行情表
+        # A. 行情數據
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS daily_scans (
                 ticker VARCHAR(20), stock_name VARCHAR(50), price FLOAT, change_pct FLOAT, 
@@ -29,7 +29,7 @@ try:
                 PRIMARY KEY (ticker, scan_date)
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
         """))
-        # 錯誤診斷與股票池、資產庫存
+        # B. 診斷與資產表 (Ticker 為主鍵)
         conn.execute(text("CREATE TABLE IF NOT EXISTS scan_errors (ticker VARCHAR(20), scan_date DATE, error_msg TEXT, PRIMARY KEY (ticker, scan_date));"))
         conn.execute(text("CREATE TABLE IF NOT EXISTS stock_pool (ticker VARCHAR(20) PRIMARY KEY, stock_name VARCHAR(50), sector VARCHAR(50), fund_count INT DEFAULT 0);"))
         conn.execute(text("CREATE TABLE IF NOT EXISTS portfolio (ticker VARCHAR(20) PRIMARY KEY, stock_name VARCHAR(50), entry_price FLOAT, qty FLOAT);"))
@@ -37,21 +37,27 @@ try:
 except Exception as e:
     st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (量子抓取與 LINE 通知) =================
+# ================= 2. 核心大腦 (LINE 通知與抓取邏輯) =================
 
-def send_line_message(title, df, action="買入"):
-    if df.empty: return
-    icon = "🎯" if action == "買入" else "⚠️"
-    msg = f"{icon}【哲哲戰報 - {title}】\n📢 數字會說話，這波一定要賺到流湯！\n"
+def send_line_notif(title, df, action_type="買入"):
+    """💎 哲哲戰報：自動化雙向通報"""
+    if df is None or df.empty: return
+    icon = "🎯" if action_type == "買入" else "⚠️"
+    msg = f"{icon}【哲哲戰報 - {title}】\n📢 跟我預測的一模一樣，準備賺到流湯！\n"
     for _, r in df.head(10).iterrows():
-        msg += f"✅ {r.get('ticker','')} {r.get('stock_name', r.get('名稱',''))} | 現價:{r.get('price', r.get('現價',''))}\n"
+        name = r.get('stock_name', r.get('名稱', '未知'))
+        price = r.get('price', r.get('現價', '0'))
+        msg += f"✅ {r.get('ticker', r.get('代號',''))} {name} | 現價:{price}\n"
+    
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
-    try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps({"to": USER_ID, "messages": [{"type": "text", "text": msg}]}))
+    try:
+        requests.post("https://api.line.me/v2/bot/message/push", headers=headers, 
+                      data=json.dumps({"to": USER_ID, "messages": [{"type": "text", "text": msg}]}))
     except: pass
 
 def process_logic(ticker, name, df):
     try:
-        if df is None or df.empty or len(df) < 20: return None, "天數不足"
+        if df is None or df.empty or len(df) < 20: return None, "空數據"
         c = df['Close'].replace(0, np.nan).ffill()
         if c.empty or np.isnan(c.iloc[-1]): return None, "價格無效"
         curr_p = float(c.iloc[-1])
@@ -76,9 +82,9 @@ def process_logic(ticker, name, df):
     except Exception as e: return None, str(e)
 
 def quantum_batch_loop(pool_df, mode="incremental"):
-    # 💎 動態分母連動：讀取真實筆數
-    total_count = len(pool_df)
-    if total_count == 0: return
+    # 💎 分母動態連動：抓取真實股票池總數
+    real_total = len(pool_df)
+    if real_total == 0: return
     today = datetime.now(TW_TZ).date()
     
     if mode == "reset":
@@ -88,10 +94,10 @@ def quantum_batch_loop(pool_df, mode="incremental"):
 
     done_df = pd.read_sql(text("SELECT ticker FROM daily_scans WHERE scan_date = :t AND price > 0.1"), con=engine, params={"t": today})
     remaining = pool_df[~pool_df['ticker'].isin(done_df['ticker'].tolist())].copy()
-    if remaining.empty: st.balloons(); return
+    if remaining.empty: st.balloons(); st.success("🏆 數據已全壘打！"); return
 
     p_bar = st.progress(0.0); p_text = st.empty()
-    log_box = st.status(f"⚡ 量子突圍掃描中 (分母: {total_count})...", expanded=True)
+    log_box = st.status(f"⚡ 量子突圍掃描中 (分母: {real_total})...", expanded=True)
     
     tickers = remaining['ticker'].tolist(); names = dict(zip(remaining['ticker'], remaining['stock_name']))
     batch_size = 25
@@ -102,7 +108,11 @@ def quantum_batch_loop(pool_df, mode="incremental"):
             for t in curr_batch:
                 df_s = data_all[t] if len(curr_batch) > 1 else data_all
                 res, msg = process_logic(t, names[t], df_s)
-                # 鋼鐵 Upsert
+                # 自動校準 .TW/.TWO
+                if res is None and ".TW" in t:
+                    df_alt = yf.download(t.replace(".TW", ".TWO"), period="7mo", progress=False, timeout=15)
+                    res, msg = process_logic(t, names[t], df_alt)
+                
                 with engine.begin() as conn:
                     conn.execute(text("DELETE FROM daily_scans WHERE ticker = :t AND scan_date = :d"), {"t": t, "d": today})
                     if res:
@@ -111,14 +121,15 @@ def quantum_batch_loop(pool_df, mode="incremental"):
                     else:
                         pd.DataFrame([{"ticker": t, "scan_date": today, "error_msg": msg}]).to_sql('scan_errors', con=engine, if_exists='append', index=False)
             
+            # 即時進度更新
             curr_done = pd.read_sql(text("SELECT count(*) FROM daily_scans WHERE scan_date = :t AND price > 0.1"), con=engine, params={"t": today}).iloc[0,0]
-            p_bar.progress(min(curr_done / total_count, 1.0))
-            p_text.markdown(f"**🚀 實際成功進度：`{curr_done}` / `{total_count}` ({curr_done/total_count:.1%})**")
+            p_bar.progress(min(curr_done / real_total, 1.0))
+            p_text.markdown(f"**🚀 實際成功進度：`{curr_done}` / `{real_total}` ({curr_done/real_total:.1%})**")
             time.sleep(random.uniform(3, 5))
         except: time.sleep(5)
     log_box.update(label="✨ 掃描結束", state="complete")
 
-# ================= 3. 視覺與色票渲染 =================
+# ================= 3. 視覺渲染 (全幅霸氣 CSS) =================
 
 def beauty_style(df):
     if df.empty: return df
@@ -133,25 +144,25 @@ def beauty_style(df):
         return styled
     except: return df
 
-# ================= 4. 主介面設計 (V133.0 戰神意志版) =================
-st.set_page_config(page_title="哲哲量子戰神 V133.0", layout="wide")
+# ================= 4. 主介面設計 (V134.0 最終決戰) =================
+st.set_page_config(page_title="哲哲量子封神 V134.0", layout="wide")
 
-# 💎 終極 CSS：按鈕 100% 寬度、文字絕對置中、霸氣紅黑漸層
+# 💎 終極 CSS：!important 強制按鈕 100% 寬度、絕對置中、霸氣紅黑漸層
 st.markdown("""<style>
     .stButton > button { 
-        width: 100% !important; height: 5em !important; font-size: 1.6rem !important; 
-        font-weight: bold !important; border-radius: 20px !important; margin-bottom: 20px !important; 
+        width: 100% !important; height: 5.5em !important; font-size: 1.6rem !important; 
+        font-weight: bold !important; border-radius: 20px !important; margin-bottom: 25px !important; 
         display: block !important; text-align: center !important;
-        background: linear-gradient(135deg, #2b2b2b 0%, #1e1e1e 100%); color: white;
-        border: 2px solid #444; transition: all 0.4s ease;
+        background: linear-gradient(135deg, #2b2b2b 0%, #1e1e1e 100%) !important; color: white !important;
+        border: 2px solid #444 !important; transition: all 0.4s ease !important;
     }
-    .stButton > button:hover { background: #FF3333 !important; transform: translateY(-2px); box-shadow: 0 10px 20px rgba(255,51,51,0.4); border-color: #FF3333; }
-    .big-font { font-size:55px !important; font-weight: bold; color: #FF3333; text-shadow: 2px 2px 5px #ddd; }
+    .stButton > button:hover { background: #FF3333 !important; transform: scale(1.01) !important; box-shadow: 0 10px 25px rgba(255,51,51,0.5) !important; border-color: #FF3333 !important; }
+    .big-font { font-size:60px !important; font-weight: bold; color: #FF3333; text-shadow: 2px 2px 5px #ddd; }
 </style>""", unsafe_allow_html=True)
 
-st.title("🛡️ 哲哲量化戰情室 V133.0 — 量子戰神最終回歸")
+st.title("🛡️ 哲哲量化戰情室 V134.0 — 最終決戰鋼鐵完全體")
 
-tab1, tab2, tab3 = st.tabs(["🚀 七大金剛發射台", "💼 資產即時戰報", "🛠️ 後台管理與汰除"])
+tab1, tab2, tab3 = st.tabs(["🚀 七大金剛發射台", "💼 持倉即時報表", "🛠️ 後台管理與汰除"])
 
 # --- Tab 1: 七大金剛 ---
 with tab1:
@@ -162,7 +173,7 @@ with tab1:
             db_df = pd.read_sql(text("SELECT * FROM daily_scans WHERE scan_date = :today AND price > 0.5"), con=engine, params={"today": datetime.now(TW_TZ).date()})
             if not db_df.empty: 
                 db_df = db_df.rename(columns={'change_pct': '漲跌(%)', 'price':'現價', 'ticker':'代號', 'stock_name':'名稱', 'rsi':'RSI', 'roe':'ROE', 'rev_growth':'營收成長'})
-                st.session_state['master_df'] = db_df; st.success(f"✅ 載入 {len(db_df)} 筆標的")
+                st.session_state['master_df'] = db_df; st.success(f"✅ 載入成功！")
     with c2:
         if st.button("⚡ 啟動量子增量掃描"):
             pool = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
@@ -173,11 +184,11 @@ with tab1:
             quantum_batch_loop(pool, mode="reset"); st.rerun()
 
     st.divider()
-    st.markdown("### 🔥 買股必勝發射台 (七大金剛全幅置中)")
+    st.markdown("### 🔥 買股必勝發射台 (七大金剛霸氣置中)")
     
-    # 策略 1-7
+    # 七大金剛策略按鈕 (自動串聯 LINE)
     strategies = [
-        ("💎 策略 1: 超級策略 (基金+ROE+營收)", "(df['fund_count'] >= 100) & (df['ROE'] > 0.1)"),
+        ("💎 策略 1: 降臨：超級策略 (基金+ROE+營收)", "(df['fund_count'] >= 100) & (df['ROE'] > 0.1)"),
         ("📈 策略 2: 帶量突破前高 (圖一)", "(df['現價'] > df['high_20']) & (df['vol'] > df['vol_20'] * 1.5)"),
         ("🚀 策略 3: 三線合一多頭 (圖二)", "(df['sma5'] > df['ma20']) & (df['ma20'] > df['ma60'])"),
         ("🌀 策略 4: 布林縮口突破 (圖三)", "(df['現價'] > df['bbu']) & (df['bb_width'] < 0.15)"),
@@ -190,66 +201,60 @@ with tab1:
         if st.button(name):
             if 'master_df' in st.session_state:
                 df = st.session_state['master_df'].copy()
-                # 使用安全過濾
                 p_info = pd.read_sql("SELECT ticker, fund_count FROM stock_pool", con=engine)
                 df = pd.merge(df, p_info, left_on='代號', right_on='ticker', how='left')
                 res = df[eval(cond)]
                 st.dataframe(beauty_style(res), use_container_width=True)
-                send_line_message(name, res, "買入")
+                send_line_notif(name, res, "買入")
 
 # --- Tab 2: 資產報表 ---
 with tab2:
-    st.header("💼 我的資產即時戰報 (真錢獲利精算法)")
+    st.header("💼 我的資產即時戰報 (真錢獲利鎖死版)")
     df_p = pd.read_sql("SELECT ticker, stock_name, entry_price, qty FROM portfolio", con=engine)
     if not df_p.empty:
         if st.button("🔄 更新資產現價"):
             quantum_batch_loop(df_p[['ticker','stock_name']], mode="incremental"); st.rerun()
         
-        # 💎 數據合併：資產表 Left Join 掃描表
+        # 💎 合併數據：庫存表 + 今日行情
         p_prices = pd.read_sql(text("SELECT ticker, price, sma5, ma20, rsi FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": datetime.now(TW_TZ).date()})
         df_display = pd.merge(df_p, p_prices, on='ticker', how='left').fillna(0)
         
-        # 💎 真錢邏輯：price > 0 才算，否則顯示 0，防止 0050 造成數萬虧損假象
+        # 💎 獲利鎖死核心：價格 > 0 才計算，否則獲利歸 0 (解決 0050 虧損假象)
         for c in ['entry_price', 'price', 'qty']: df_display[c] = pd.to_numeric(df_display[c], errors='coerce').fillna(0)
         df_display['獲利'] = np.where(df_display['price'] > 0, (df_display['price'] - df_display['entry_price']) * df_display['qty'], 0)
         df_display['報酬率(%)'] = np.where(df_display['price'] > 0.1, ((df_display['price'] - df_display['entry_price']) / (df_display['entry_price'].replace(0, 1))) * 100, 0)
         
-        # 總獲利顯示
-        total_profit = df_display['獲利'].sum()
-        st.markdown(f"當前總獲利：<p class='big-font'>${total_profit:,.0f}</p>", unsafe_allow_html=True)
+        st.markdown(f"當前總獲利：<p class='big-font'>${df_display['獲利'].sum():,.0f}</p>", unsafe_allow_html=True)
         st.dataframe(beauty_style(df_display), use_container_width=True)
         
         st.divider()
-        st.markdown("### 🎯 五大必勝賣股決策 (自動發送 LINE)")
-        m_c = st.columns(5)
+        st.markdown("### 🎯 五大必勝賣股決策 (自動通知 LINE)")
+        m_col = st.columns(5)
         s_btns = [("💀 均線死叉", "sma5 < ma20"), ("🔥 RSI 過熱", "rsi > 80"), ("💰 利潤止盈", "報酬率(%) > 20"), ("📉 破位停損", "報酬率(%) < -10"), ("⚠️ 跌破月線", "price < ma20")]
         for i, (name, cond) in enumerate(s_btns):
-            if m_c[i].button(name):
-                # 過濾出符合賣出的標的
+            if m_col[i].button(name):
                 if "報酬率" in cond: res_s = df_display[df_display['報酬率(%)'] > 20] if "20" in cond else df_display[df_display['報酬率(%)'] < -10]
                 elif "sma5" in cond: res_s = df_display[df_display['sma5'] < df_display['ma20']]
                 elif "rsi" in cond: res_s = df_display[df_display['rsi'] > 80]
                 else: res_s = df_display[df_display['price'] < df_display['ma20']]
-                res_s = res_s[res_s['price'] > 0] # 只看真的有價格的
+                res_s = res_s[res_s['price'] > 0]
                 st.dataframe(beauty_style(res_s))
-                send_line_message(f"賣訊：{name}", res_s, "賣出")
+                send_line_notif(f"賣訊：{name}", res_s, "賣出")
 
 # --- Tab 3: 管理中心 ---
 with tab3:
-    st.subheader("🛠️ 數據管理中心 (上傳與汰除)")
+    st.subheader("🛠️ 數據管理與汰除 (遺失功能全歸位)")
     
     # 💎 OTC 照妖鏡
-    st.markdown("#### 🔍 OTC 快速查找器")
-    if st.button("🚀 幫我列出池子裡的所有上櫃股票代號 (.TWO)"):
+    if st.button("🚀 幫我找出池子裡的所有上櫃股票 (.TWO)"):
         otc_stocks = pd.read_sql(text("SELECT ticker FROM stock_pool WHERE ticker LIKE '%%.TWO%%'"), con=engine)
         if not otc_stocks.empty:
             st.code(", ".join(otc_stocks['ticker'].tolist()))
-            st.info("💡 請複製上方代號，貼到下方框框進行汰除！")
+            st.info("💡 請複製代號，貼到下方框框汰除！")
         else: st.success("✅ 目前池子乾乾淨淨！")
 
     st.divider()
-    st.markdown("#### 🚫 批量剔除股票 (髒數據一秒清空)")
-    del_list = st.text_area("請貼入要刪除的代號")
+    del_list = st.text_area("請貼入要刪除的代號 (例如: 3293.TW, 3491.TW)")
     if st.button("🔥 鋼鐵汰除黑名單"):
         if del_list:
             t_del = [t.strip().upper() for t in del_list.replace('\n', ',').split(',') if t.strip()]
@@ -261,21 +266,20 @@ with tab3:
             st.success(f"✅ 已移除 {len(t_del)} 檔標的！")
     
     st.divider()
-    st.markdown("#### 💾 數據匯入")
     col_u1, col_u2 = st.columns(2)
     with col_u1:
-        f1 = st.file_uploader("上傳股票池 CSV", type="csv", key="pool_up")
+        f1 = st.file_uploader("上傳股票池 CSV", type="csv", key="pool_csv")
         if f1 and st.button("💾 匯入股票池"):
             df_new = pd.read_csv(f1, encoding='utf-8-sig')
             with engine.begin() as conn:
                 for t in df_new['ticker'].tolist(): conn.execute(text("DELETE FROM stock_pool WHERE ticker = :t"), {"t": str(t).upper().strip()})
             df_new.to_sql('stock_pool', con=engine, if_exists='append', index=False); st.success("成功！")
     with col_u2:
-        f2 = st.file_uploader("上傳資產庫存 CSV (ticker, stock_name, entry_price, qty)", type="csv", key="port_up")
+        f2 = st.file_uploader("上傳資產庫存 CSV", type="csv", key="port_csv")
         if f2 and st.button("💾 匯入持倉"):
             df_new = pd.read_csv(f2, encoding='utf-8-sig')
             with engine.begin() as conn:
                 for t in df_new['ticker'].tolist(): conn.execute(text("DELETE FROM portfolio WHERE ticker = :t"), {"t": str(t).upper().strip()})
             df_new.to_sql('portfolio', con=engine, if_exists='append', index=False); st.success("資產匯入成功！")
 
-st.caption("本系統由哲哲團隊開發。V133.0 量子戰神完全體，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。V134.0 最終決戰全能版，賺到流湯不要忘了我！")
