@@ -16,7 +16,7 @@ try:
     
     with engine.connect() as conn:
         conn.execute(text("SET NAMES utf8mb4;"))
-        # A. 核心掃描表 (21 個精準指標)
+        # A. 核心掃描表 (21 個指標)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS daily_scans (
                 ticker VARCHAR(20), stock_name VARCHAR(50), price FLOAT, change_pct FLOAT, 
@@ -45,18 +45,19 @@ try:
 except Exception as e:
     st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (閃電潛行抓取引擎) =================
+# ================= 2. 核心大腦 (閃電提速抓取引擎) =================
 
 def fetch_full_stock_package(ticker, name):
-    """💎 哲哲全能抓取：yfinance + curl_cffi 指紋模擬"""
+    """💎 哲哲提速抓取：閃電間隔 0.5s"""
+    # 💎 閃電節奏：隨機 0.5 ~ 0.8s
+    time.sleep(random.uniform(0.5, 0.8))
     try:
         s = yf.Ticker(ticker)
-        d = s.history(period="7mo", interval="1d", timeout=30)
+        d = s.history(period="7mo", interval="1d", timeout=20)
         
-        # 備援判斷
         if d.empty or len(d) < 65:
             alt_t = ticker.replace(".TW", ".TWO") if ".TW" in ticker else ticker.replace(".TWO", ".TW")
-            d = yf.Ticker(alt_t).history(period="7mo", interval="1d", timeout=30)
+            d = yf.Ticker(alt_t).history(period="7mo", interval="1d", timeout=20)
             if d.empty or len(d) < 65: return None, "數據不足"
         
         c, v = d['Close'], d['Volume']
@@ -86,68 +87,62 @@ def fetch_full_stock_package(ticker, name):
     except Exception as e:
         return None, str(e)
 
-def lightning_stealth_loop(pool_df):
-    """🚀 哲哲閃電潛行迴圈：增量抓取、碎片入庫、無限回補"""
+def lightning_homerun_loop(pool_df):
+    """🚀 哲哲閃電提速迴圈：雙線程提速、碎片化入庫、進度條同步"""
     total_count = len(pool_df)
     today = datetime.now().date()
-    
     progress_bar = st.progress(0)
     status_msg = st.empty()
-    log_box = st.status("🚀 啟動閃電潛行掃描 (碎片化入庫模式)...", expanded=True)
+    log_box = st.status("🚀 閃電提速程序啟動 (碎分化提速模式)...", expanded=True)
     
     round_num = 1
     while True:
-        # A. 檢查「今日已入庫」清單
+        # A. 檢查清單
         done_df = pd.read_sql(text("SELECT ticker FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": today})
         done_list = done_df['ticker'].tolist()
         remaining_pool = pool_df[~pool_df['ticker'].isin(done_list)].copy()
         
-        # 更新進度條
         progress_bar.progress(len(done_list) / total_count)
-        
         if remaining_pool.empty:
-            st.balloons()
-            status_msg.success(f"🏆 100% 全壘打！今日 {total_count} 檔標的已全部到齊。")
-            log_box.update(label="✨ 數據全數歸位，任務結束！", state="complete")
+            st.balloons(); status_msg.success(f"🏆 100% 全壘打！共抓取 {total_count} 檔。")
+            log_box.update(label="✨ 任務完成！數據全數歸位。", state="complete")
             break
-
-        if round_num > 15: # 終極安全線
-            st.error("🚨 嘗試多輪仍有剩餘，請休息後再戰。")
-            break
-
-        status_msg.info(f"📍 正在執行第 {round_num} 輪閃電補洞 | 剩餘 {len(remaining_pool)} 檔...")
-        batch_list = remaining_pool.sample(frac=1).to_dict('records') # 洗牌
         
-        counter = 0
-        for r in batch_list:
-            # 💎 閃電節奏：0.5~0.8s
-            time.sleep(random.uniform(0.5, 0.8))
-            
-            # 💎 安全潛行：每 10 檔觸發一次長休息
-            counter += 1
-            if counter % 10 == 0:
-                log_box.write("☕ 觸發安全潛行，休息 2.5 秒...")
-                time.sleep(random.uniform(2.0, 3.0))
-            
-            data, err = fetch_full_stock_package(r['ticker'], r['stock_name'])
-            
-            if data:
-                # 💎 碎片化入庫：抓到即上傳
-                pd.DataFrame([data]).to_sql('daily_scans', con=engine, if_exists='append', index=False)
-                current_done = len(done_list) + 1 # 這裡僅做顯示，下一輪會重新精準計算
-                log_box.write(f"✅ 入庫成功：{data['stock_name']}")
-                progress_bar.progress((len(done_list) + counter) / total_count if (len(done_list) + counter) <= total_count else 0.99)
-            else:
-                log_box.write(f"⚠️ {r['ticker']} 跳過：{err}")
-                if "429" in str(err) or "Rate" in str(err):
-                    st.warning("🚨 警衛封鎖，本輪提前結束並進入長效休息。")
-                    time.sleep(30)
-                    break
+        if round_num > 10: break
+
+        status_msg.info(f"📍 正在執行第 {round_num} 輪閃電補洞 | 剩餘 {len(remaining_pool)} 檔")
+        batch_list = remaining_pool.sample(frac=1).to_dict('records')
         
+        # 💎 關鍵：使用雙線程提速 (worker=2)，既暴力又相對安全
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futures = {ex.submit(fetch_full_stock_package, r['ticker'], r['stock_name']): r['ticker'] for r in batch_list}
+            
+            counter = 0
+            for f in as_completed(futures):
+                data, err = f.result()
+                counter += 1
+                
+                # 💎 安全間隔：每 15 檔大休息 2 秒
+                if counter % 15 == 0:
+                    log_box.write("☕ 觸發安全潛行，休息 2 秒...")
+                    time.sleep(random.uniform(2.0, 3.0))
+
+                if data:
+                    # 💎 碎片化入庫：抓到即上傳，絕對不重複
+                    pd.DataFrame([data]).to_sql('daily_scans', con=engine, if_exists='append', index=False)
+                    log_box.write(f"✅ 入庫：{data['stock_name']}")
+                    progress_bar.progress((len(done_list) + counter) / total_count if (len(done_list) + counter) <= total_count else 0.99)
+                else:
+                    log_box.write(f"⚠️ {futures[f]} 跳過：{err}")
+                    if "429" in str(err) or "Rate" in str(err):
+                        log_box.write("🚨 被鎖，提前進入休息...")
+                        time.sleep(15) # 被鎖也要休息，否則 IP 會死
+                        break
+
         round_num += 1
-        time.sleep(5) # 輪與輪之間的小休息
+        time.sleep(3)
 
-# ================= 3. 視覺渲染與 LINE 戰報 =================
+# ================= 3. 視覺與 LINE 戰報 (百分百歸位) =================
 
 def send_line_report(title, df, icon):
     if df.empty: return
@@ -158,7 +153,7 @@ def send_line_report(title, df, icon):
     msg = f"{icon}【哲哲戰報 - {title}】\n🎯 符合標的：\n"
     for _, r in temp.iterrows():
         msg += f"✅ {r.get(t_col,'')} {r.get(n_col,'')} | 現價:{r.get(p_col,'')}\n"
-    msg += "\n跟我預測的一模一樣，準備賺到流湯！🚀"
+    msg += "\n跟我預測的一模一樣，賺到流湯！🚀"
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps({"to": USER_ID, "messages": [{"type": "text", "text": msg}]}))
     except: pass
@@ -169,15 +164,14 @@ def style_df(df):
 
 st.markdown("""<style>.big-font { font-size:48px !important; font-weight: bold; color: #FF3333; text-shadow: 2px 2px 4px #eee; }</style>""", unsafe_allow_html=True)
 
-# ================= 4. 主介面設計 (V99.0 閃電潛行版) =================
-st.set_page_config(page_title="哲哲戰情室 V99.0", layout="wide")
-st.title("🛡️ 哲哲量化戰情室 V99.0 — 閃電潛行與即時存檔版")
+# ================= 4. 主介面設計 (V101.0 七大金剛閃電版) =================
+st.set_page_config(page_title="哲哲戰情室 V101.0", layout="wide")
+st.title("🛡️ 哲哲量化戰情室 V101.0 — 閃電提速與全功能全壘打")
 
-tab1, tab2, tab3 = st.tabs(["🚀 核心策略發射台", "💼 資產監控戰報", "🛠️ 數據管理中心"])
+tab1, tab2, tab3 = st.tabs(["🚀 核心策略發射台", "💼 持倉監控戰報", "🛠️ 數據管理中心"])
 
-# --- Tab 1: 七大金剛不藏私 ---
 with tab1:
-    st.markdown("### 🏆 每日行情掃描 (閃電變速模式)")
+    st.markdown("### 🏆 每日行情掃描 (閃電暴力提速模式)")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("📡 讀取今日數據 (包含已補洞)", use_container_width=True):
@@ -186,12 +180,12 @@ with tab1:
                 db_df = db_df.rename(columns={'change_pct': '漲跌(%)', 'price':'現價', 'ticker':'代號', 'stock_name':'名稱', 'rsi':'RSI', 'roe':'ROE', 'rev_growth':'營收成長'})
                 for c in ['現價','漲跌(%)','sma5','ma20','ma60','RSI','kd20','kd60','ROE','營收成長','fund_count','high_20','vol_20','bb_width']:
                     if c in db_df.columns: db_df[c] = pd.to_numeric(db_df[c], errors='coerce').fillna(0)
-                st.session_state['master_df'] = db_df; st.success(f"✅ 載入成功！已有 {len(db_df)} 筆數據。")
+                st.session_state['master_df'] = db_df; st.success(f"✅ 載入成功！")
     with c2:
-        if st.button("⚡ 啟動全壘打渦輪掃描 (閃電變速補洞)", use_container_width=True):
+        if st.button("⚡ 啟動全壘打渦輪掃描 (閃電碎片回補)", use_container_width=True):
             pool = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
             if not pool.empty:
-                lightning_stealth_loop(pool)
+                lightning_homerun_loop(pool)
                 st.rerun()
 
     st.divider()
@@ -232,13 +226,12 @@ with tab1:
                 res = df[(abs(df['現價']-df['ma20'])/df['ma20'].replace(0,1)<0.02)]
                 st.dataframe(style_df(res)); send_line_report("強勢回測", res, "🎯")
 
-# --- Tab 2: 持倉監控 (LINE 五大訊號) ---
 with tab2:
     st.header("💼 我的資產即時戰報")
     df_p = pd.read_sql("SELECT ticker, stock_name, entry_price, qty FROM portfolio", con=engine)
     if not df_p.empty:
-        if st.button("🔄 更新資產現價 (全壘打補洞同步)", use_container_width=True):
-            lightning_stealth_loop(df_p[['ticker','stock_name']])
+        if st.button("🔄 更新資產現價 (閃電回補同步)", use_container_width=True):
+            lightning_homerun_loop(df_p[['ticker','stock_name']])
             st.rerun()
         
         today_p = pd.read_sql(text("SELECT ticker, price, sma5, ma20, rsi FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": datetime.now().date()})
@@ -262,9 +255,8 @@ with tab2:
                     st.dataframe(style_df(disp)); send_line_report(f"賣訊：{name}", disp, icon)
                 else: st.success("✅ 目前安全")
 
-# --- Tab 3: 後台管理 ---
 with tab3:
-    st.subheader("🛠️ 數據管理中心 (鋼鐵 Upsert 版)")
+    st.subheader("🛠️ 數據管理中心 (鋼鐵 Upsert)")
     ch1, ch2 = st.columns(2)
     with ch1:
         f1 = st.file_uploader("上傳股票池 CSV", type="csv")
@@ -281,4 +273,4 @@ with tab3:
                 for t in df_new['ticker'].tolist(): conn.execute(text("DELETE FROM portfolio WHERE ticker = :t"), {"t": str(t).upper().strip()})
             df_new.to_sql('portfolio', con=engine, if_exists='append', index=False); st.success("成功！")
 
-st.caption("本系統由哲哲團隊開發。閃電潛行 V99.0，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。閃電提速 V101.0，賺到流湯不要忘了我！")
