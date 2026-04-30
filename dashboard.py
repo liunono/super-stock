@@ -16,7 +16,7 @@ try:
 except ImportError:
     HAS_CURL_CFFI = False
 
-# ================= 1. 系統地基 (鋼鐵防護與美學定義) =================
+# ================= 1. 系統地基 (鋼鐵防護與時區) =================
 try:
     TW_TZ = pytz.timezone('Asia/Taipei')
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
@@ -41,33 +41,27 @@ try:
 except Exception as e:
     st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (TLS 隱身抓取與暴力重試) =================
+# ================= 2. 核心大腦 (數據除魔引擎) =================
 
 def get_hidden_session():
-    """💎 建立 TLS 指紋偽裝 Session"""
+    """💎 建立 TLS 隱身 Session"""
     if HAS_CURL_CFFI:
-        # 偽裝成 Chrome 120 的瀏覽器指紋
         return CFSession(impersonate="chrome")
     else:
         session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-        })
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'})
         return session
 
 def fetch_full_stock_package(ticker, name):
-    """💎 哲哲 TLS 突圍抓取：暴力三連擊"""
-    for attempt in range(3):
+    """💎 哲哲除魔抓取：暴力重試 + NaN 嚴格封殺"""
+    for attempt in range(2):
         try:
-            time.sleep(random.uniform(0.6, 1.2))
-            
-            # 使用隱身 Session
+            time.sleep(random.uniform(0.6, 1.0))
             session = get_hidden_session()
             s = yf.Ticker(ticker, session=session)
-            
             d = s.history(period="7mo", interval="1d", timeout=15)
             
-            # 備援：若失敗嘗試切換後綴
+            # 備援上市櫃後綴
             if d.empty or len(d) < 40:
                 alt_t = ticker.replace(".TW", ".TWO") if ".TW" in ticker else ticker.replace(".TWO", ".TW")
                 s = yf.Ticker(alt_t, session=session)
@@ -75,15 +69,22 @@ def fetch_full_stock_package(ticker, name):
 
             if d.empty or len(d) < 40: continue
 
-            c, v = d['Close'], d['Volume']
-            curr_price = float(c.iloc[-1])
-            if curr_price <= 0: continue 
+            # 💎 數據除魔：檢查股價是否為有效數字
+            last_close = d['Close'].iloc[-1]
+            if last_close is None or np.isnan(last_close) or last_close <= 0:
+                continue # 是 NaN 或 0 就當作失敗重抓
 
-            # 技術指標
-            sma5, ma20, ma60 = ta.sma(c, 5), ta.sma(c, 20), ta.sma(c, 60)
-            rsi, bb = ta.rsi(c, 14), ta.bbands(c, 20, 2)
+            c, v = d['Close'], d['Volume']
+            curr_price = float(last_close)
+
+            # 技術指標 (確保計算後也沒 NaN)
+            sma5 = ta.sma(c, 5).fillna(curr_price)
+            ma20 = ta.sma(c, 20).fillna(curr_price)
+            ma60 = ta.sma(c, 60).fillna(curr_price)
+            rsi = ta.rsi(c, 14).fillna(50)
+            bb = ta.bbands(c, 20, 2).fillna(0)
             
-            # 財報分流
+            # 財報數據
             roe, rev = 0.0, 0.0
             try:
                 info = s.info
@@ -94,27 +95,24 @@ def fetch_full_stock_package(ticker, name):
             return {
                 "ticker": ticker, "stock_name": name, "price": curr_price,
                 "change_pct": float(((c.iloc[-1]-c.iloc[-2])/c.iloc[-2])*100),
-                "sma5": float(sma5.iloc[-1] if not np.isnan(sma5.iloc[-1]) else 0),
-                "ma20": float(ma20.iloc[-1] if not np.isnan(ma20.iloc[-1]) else 0),
-                "ma60": float(ma60.iloc[-1] if not np.isnan(ma60.iloc[-1]) else 0),
-                "rsi": float(rsi.iloc[-1] if not np.isnan(rsi.iloc[-1]) else 0),
+                "sma5": float(sma5.iloc[-1]), "ma20": float(ma20.iloc[-1]),
+                "ma60": float(ma60.iloc[-1]), "rsi": float(rsi.iloc[-1]),
                 "vol": int(v.iloc[-1]), "avg_vol": int(ta.sma(v, 20).iloc[-1]),
                 "kd20": float(c.iloc[-20]), "kd60": float(c.iloc[-60]), 
                 "scan_date": datetime.now(TW_TZ).date(),
-                "bbu": float(bb.iloc[-1, 2] if not np.isnan(bb.iloc[-1, 2]) else 0),
-                "bbl": float(bb.iloc[-1, 0] if not np.isnan(bb.iloc[-1, 0]) else 0),
+                "bbu": float(bb.iloc[-1, 2]), "bbl": float(bb.iloc[-1, 0]),
                 "high_20": float(c.shift(1).rolling(20).max().iloc[-1]),
                 "vol_20": float(v.shift(1).rolling(20).mean().iloc[-1]),
                 "bb_width": float((bb.iloc[-1, 2] - bb.iloc[-1, 0]) / ma20.iloc[-1] if ma20.iloc[-1] != 0 else 0),
                 "roe": roe, "rev_growth": rev, "fund_count": 0 
             }, None
         except Exception as e:
-            if attempt == 2: return None, str(e)
-            time.sleep(2)
-    return None, "多次重試封鎖"
+            if attempt == 1: return None, str(e)
+            time.sleep(1)
+    return None, "數據全為空值(NaN)"
 
 def lightning_homerun_loop(pool_df, mode="incremental"):
-    """🚀 哲哲全壘打迴圈：TLS 突圍版"""
+    """🚀 哲哲除魔迴圈：防止無限迴圈 & 標記棄子"""
     total_count = len(pool_df)
     if total_count == 0: return
     today = datetime.now(TW_TZ).date()
@@ -124,55 +122,66 @@ def lightning_homerun_loop(pool_df, mode="incremental"):
 
     p_bar = st.progress(0.0)
     p_text = st.empty()
-    log_box = st.status(f"⚡ TLS 隱身突圍掃描中 ({mode})...", expanded=True)
+    log_box = st.status(f"⚡ TLS 數據除魔掃描中 ({mode})...", expanded=True)
     
-    round_num = 1
+    fail_tracker, round_num = {}, 1
     while True:
-        done_df = pd.read_sql(text("SELECT ticker FROM daily_scans WHERE scan_date = :t AND price > 0.1"), con=engine, params={"t": today})
+        # 💎 讀取任何今日已記錄標的 (含棄子)
+        done_df = pd.read_sql(text("SELECT ticker FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": today})
         done_list = done_df['ticker'].tolist()
         remaining_pool = pool_df[~pool_df['ticker'].isin(done_list)].copy()
         
-        curr_done = len(done_list)
-        p_bar.progress(min(curr_done / total_count, 1.0))
-        p_text.markdown(f"**🚀 突圍進度：`{curr_done}` / `{total_count}` ({curr_done/total_count:.1%})**")
+        # 只算「有效抓到錢」的作為進度
+        success_df = pd.read_sql(text("SELECT count(*) FROM daily_scans WHERE scan_date = :t AND price > 0.1"), con=engine, params={"t": today})
+        success_count = success_df.iloc[0,0]
+        
+        curr_val = min(len(done_list) / total_count, 1.0)
+        p_bar.progress(curr_val)
+        p_text.markdown(f"**🚀 掃描進度：`{len(done_list)}` / `{total_count}` (成功入庫: {success_count})**")
 
         if remaining_pool.empty:
-            st.balloons(); p_text.success("🏆 TLS 全壘打達成！標的已全部入庫。"); break
-        if round_num > 15: break 
+            st.balloons(); p_text.success(f"🏆 100% 掃描完成！有效標的共 {success_count} 檔。"); break
+        if round_num > 10: break 
 
         batch_list = remaining_pool.sample(frac=1).to_dict('records')
         with ThreadPoolExecutor(max_workers=2) as ex:
             futures = {ex.submit(fetch_full_stock_package, r['ticker'], r['stock_name']): r['ticker'] for r in batch_list}
-            batch_count = 0
+            batch_done = 0
             for f in as_completed(futures):
                 ticker = futures[f]
                 data, err = f.result()
-                batch_count += 1
+                batch_done += 1
                 
                 if data:
                     with engine.begin() as conn:
                         conn.execute(text("DELETE FROM daily_scans WHERE ticker = :t AND scan_date = :d"), {"t": ticker, "d": today})
                     pd.DataFrame([data]).to_sql('daily_scans', con=engine, if_exists='append', index=False)
-                    # UI 更新
-                    dyn_done = curr_done + batch_count
-                    p_bar.progress(min(dyn_done / total_count, 1.0))
-                    p_text.markdown(f"**🚀 突圍進度：`{dyn_done}` / `{total_count}` ({min(dyn_done/total_count, 1.0):.1%})**")
                     log_box.write(f"✅ 突圍入庫：{data['stock_name']} (${data['price']})")
                 else:
-                    log_box.write(f"⚠️ {ticker} 遭攔截：{err}")
+                    fail_tracker[ticker] = fail_tracker.get(ticker, 0) + 1
+                    # 💎 三振棄子：抓不到就把價格存成 0.0001，防止無限迴圈
+                    if fail_tracker[ticker] >= 3:
+                        pd.DataFrame([{"ticker": ticker, "stock_name": "無效標的", "scan_date": today, "price": 0.0001}]).to_sql('daily_scans', con=engine, if_exists='append', index=False)
+                        log_box.write(f"🚫 {ticker} 數據缺失，標記棄子。")
+                    else:
+                        log_box.write(f"⚠️ {ticker} 暫跳：{err}")
+                
+                # UI 即時跳動
+                p_bar.progress(min((len(done_list) + batch_done) / total_count, 1.0))
 
         round_num += 1
         time.sleep(5)
-    log_box.update(label="✨ 任務結束，請讀取行情。", state="complete")
+    log_box.update(label="✨ 掃描結束。", state="complete")
 
-# ================= 3. 視覺與色票渲染 =================
+# ================= 3. 視覺渲染器 (冠軍漸層) =================
 
 def beauty_style(df):
-    """💎 哲哲冠軍美學漸層色票"""
+    """💎 哲哲冠軍色票"""
     if df.empty: return df
-    num_cols = ['現價','漲跌(%)','ROE','營收成長','獲利','報酬率(%)']
-    for c in num_cols:
+    # 確保數值化
+    for c in ['現價','漲跌(%)','ROE','營收成長','獲利','報酬率(%)']:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+    
     f_map = {'現價': '{:.2f}', '漲跌(%)': '{:+.2f}%', 'RSI': '{:.1f}', 'ROE': '{:.2%}', '營收成長': '{:.2%}', '獲利': '{:,.0f}', '報酬率(%)': '{:+.2f}%'}
     try:
         styled = df.style.format({k: v for k, v in f_map.items() if k in df.columns}, na_rep='-')
@@ -180,43 +189,41 @@ def beauty_style(df):
         if 'ROE' in df.columns: styled = styled.background_gradient(subset=['ROE'], cmap='YlOrRd', low=0.08, high=0.25)
         if '營收成長' in df.columns: styled = styled.background_gradient(subset=['營收成長'], cmap='OrRd', low=0.05, high=0.6)
         if '報酬率(%)' in df.columns: styled = styled.background_gradient(subset=['報酬率(%)'], cmap='RdYlGn_r', low=-10, high=10)
+        
         def color_t(v):
             if isinstance(v, (int, float)):
-                if v > 0: return 'color: #FF3333; font-weight: bold'
-                if v < 0: return 'color: #00AA00; font-weight: bold'
+                if v > 0.1: return 'color: #FF3333; font-weight: bold'
+                if v < -0.1: return 'color: #00AA00; font-weight: bold'
             return ''
         return styled.map(color_t, subset=[c for c in ['漲跌(%)', '報酬率(%)', '獲利'] if c in df.columns])
     except: return df
 
-# ================= 4. 主介面設計 (V118.0 完全體) =================
-st.set_page_config(page_title="哲哲量化美學戰情室 V118.0", layout="wide")
+# ================= 4. 主介面設計 (V119.0 完全體) =================
+st.set_page_config(page_title="哲哲量化除魔戰情室 V119.0", layout="wide")
 st.markdown("""<style>
-    .big-font { font-size:48px !important; font-weight: bold; color: #FF3333; text-shadow: 2px 2px 4px #eee; }
-    div.stButton > button { height: 4em; font-size: 1.4rem !important; font-weight: bold !important; border-radius: 15px; margin-bottom: 12px; width: 100% !important; }
+    div.stButton > button { height: 4em; font-size: 1.3rem !important; font-weight: bold !important; border-radius: 12px; width: 100% !important; margin-bottom: 10px; }
 </style>""", unsafe_allow_html=True)
 
-st.title("🛡️ 哲哲量化戰情室 V118.0 — TLS 突圍完全體")
-now_tw = datetime.now(TW_TZ)
-if now_tw.hour == 13 and now_tw.minute >= 31:
-    st.warning("🔔 **收盤時間到！建議『暴力覆蓋重掃』鎖定最終籌碼！**")
+st.title("🛡️ 哲哲量化戰情室 V119.0 — 數據除魔完全體")
 
-tab1, tab2, tab3 = st.tabs(["🚀 指揮官中心", "💼 持倉監控", "🛠️ 後台管理"])
+tab1, tab2, tab3 = st.tabs(["🚀 指揮官指揮中心", "💼 持倉監控戰報", "🛠️ 後台管理都更"])
 
 with tab1:
-    st.markdown("### 🏆 每日行情 TLS 隱身突圍掃描")
+    st.markdown("### 🏆 每日行情突圍全掃描 (絕滅 NaN)")
     c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("📡 讀取今日數據快取", use_container_width=True):
+        if st.button("📡 讀取今日行情數據 (顯示有效標的)", use_container_width=True):
             db_df = pd.read_sql(text("SELECT * FROM daily_scans WHERE scan_date = :today AND price > 0.1"), con=engine, params={"today": datetime.now(TW_TZ).date()})
             if not db_df.empty: 
                 db_df = db_df.rename(columns={'change_pct': '漲跌(%)', 'price':'現價', 'ticker':'代號', 'stock_name':'名稱', 'rsi':'RSI', 'roe':'ROE', 'rev_growth':'營收成長'})
-                st.session_state['master_df'] = db_df; st.success(f"✅ 載入成功！")
+                st.session_state['master_df'] = db_df; st.success(f"✅ 載入成功！共 {len(db_df)} 筆有價標的。")
+            else: st.warning("資料庫無效，請點擊啟動掃描！")
     with c2:
-        if st.button("⚡ 啟動增量渦輪突圍", use_container_width=True):
+        if st.button("⚡ 啟動增量渦輪除魔", use_container_width=True):
             pool = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
             if not pool.empty: lightning_homerun_loop(pool, mode="incremental"); st.rerun()
     with c3:
-        if st.button("🔥 暴力覆蓋重掃", use_container_width=True):
+        if st.button("🔥 暴力覆蓋重掃 (強制重置)", use_container_width=True):
             pool = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
             if not pool.empty: lightning_homerun_loop(pool, mode="reset"); st.rerun()
 
@@ -233,26 +240,14 @@ with tab1:
             st.dataframe(beauty_style(df[mask].sort_values(by='營收成長', ascending=False)), use_container_width=True)
         else: st.error("⚠️ 請先讀取數據！")
 
-    if st.button("📈 帶量突破前高 (圖一)", use_container_width=True):
+    if st.button("👑 九成勝率 ATM / 帶量突破", use_container_width=True):
         if 'master_df' in st.session_state:
             df = st.session_state['master_df']
-            res = df[(df['現價'] > df['high_20']) & (df['vol'] > df['vol_20'] * 1.5)]
-            st.dataframe(beauty_style(res), use_container_width=True)
-
-    if st.button("🚀 三線合一多頭 (圖二)", use_container_width=True):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df']
-            res = df[(df['sma5'] > df['ma20']) & (df['ma20'] > df['ma60']) & (abs(df['sma5']-df['ma60'])/df['ma60'].replace(0,1) < 0.05)]
-            st.dataframe(beauty_style(res), use_container_width=True)
-
-    if st.button("👑 九成勝率 ATM", use_container_width=True):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df']
-            res = df[(df['現價']>df['kd20']) & (df['現價']>df['kd60']) & (df['vol'] >= df['vol_20']*1.2)]
+            res = df[(df['現價']>df['kd20']) & (df['vol'] >= df['vol_20']*1.2)]
             st.dataframe(beauty_style(res), use_container_width=True)
 
     st.divider()
-    if st.button("🔍 揭開底牌：數據照妖鏡 (檢視 350 檔)", use_container_width=True):
+    if st.button("🔍 揭開底牌：數據照妖鏡 (今日所有數據)", use_container_width=True):
         if 'master_df' in st.session_state:
             st.dataframe(beauty_style(st.session_state['master_df']), use_container_width=True)
 
@@ -260,24 +255,25 @@ with tab2:
     st.header("💼 我的資產即時戰報")
     df_p = pd.read_sql("SELECT ticker, stock_name, entry_price, qty FROM portfolio", con=engine)
     if not df_p.empty:
-        if st.button("🔄 更新資產現價 (TLS 突圍)", use_container_width=True):
+        if st.button("🔄 更新資產現價 (絕滅 NaN)", use_container_width=True):
             lightning_homerun_loop(df_p[['ticker','stock_name']], mode="incremental"); st.rerun()
         
-        p_prices = pd.read_sql(text("SELECT ticker, price, sma5, ma20, rsi FROM daily_scans WHERE scan_date = :t AND price > 0.1"), con=engine, params={"t": datetime.now(TW_TZ).date()})
+        p_prices = pd.read_sql(text("SELECT ticker, price FROM daily_scans WHERE scan_date = :t AND price > 0.1"), con=engine, params={"t": datetime.now(TW_TZ).date()})
         df_p = pd.merge(df_p, p_prices, on='ticker', how='left')
         for c in ['entry_price', 'price', 'qty']: df_p[c] = pd.to_numeric(df_p[c], errors='coerce').fillna(0)
         df_p['獲利'] = (df_p['price'] - df_p['entry_price']) * df_p['qty']
         df_p['報酬率(%)'] = np.where(df_p['price'] > 0.1, ((df_p['price'] - df_p['entry_price']) / (df_p['entry_price'].replace(0, 1))) * 100, 0)
-        st.markdown(f"當前總獲利：<p class='big-font'>${df_p[df_p['price']>0]['獲利'].sum():,.0f}</p>", unsafe_allow_html=True)
-        st.dataframe(beauty_style(df_p[df_p['price']>0]), use_container_width=True)
+        valid_p = df_p[df_p['price'] > 0.1]
+        st.markdown(f"當前總獲利：<p style='font-size:40px; color:#FF3333; font-weight:bold;'>${valid_p['獲利'].sum():,.0f}</p>", unsafe_allow_html=True)
+        st.dataframe(beauty_style(valid_p), use_container_width=True)
 
 with tab3:
     st.subheader("🛠️ 數據管理中心")
     f1 = st.file_uploader("上傳股票池 CSV", type="csv")
-    if f1 and st.button("💾 鋼鐵匯入股票池"):
+    if f1 and st.button("💾 鋼鐵匯入"):
         df_new = pd.read_csv(f1, encoding='utf-8-sig')
         with engine.begin() as conn:
             for t in df_new['ticker'].tolist(): conn.execute(text("DELETE FROM stock_pool WHERE ticker = :t"), {"t": str(t).upper().strip()})
-        df_new.to_sql('stock_pool', con=engine, if_exists='append', index=False); st.success("匯入成功！")
+        df_new.to_sql('stock_pool', con=engine, if_exists='append', index=False); st.success("成功！")
 
-st.caption("本系統由哲哲團隊開發。V118.0 TLS 突圍完全體，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。V119.0 數據除魔完全體，賺到流湯不要忘了我！")
