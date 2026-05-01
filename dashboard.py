@@ -35,11 +35,11 @@ try:
 except Exception as e:
     st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# ================= 2. 核心計算與渲染器 (原子化存儲) =================
+# ================= 2. 核心大腦 (抓、算、存：原子化邏輯) =================
 
 def send_line_pro(title, df):
     if df is None or df.empty: return
-    msg = f"🚀【哲哲量子戰報 - {title}】\n數字會說話！進場機會來了！\n"
+    msg = f"🚀【哲哲戰報 - {title}】\n數字會說話！進場機會來了！\n"
     for _, r in df.head(8).iterrows():
         msg += f"✅ {r.get('代號', r.get('ticker',''))} {r.get('名稱', r.get('stock_name',''))} | 價:{r.get('現價', r.get('price','-'))}\n"
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
@@ -47,38 +47,51 @@ def send_line_pro(title, df):
     except: pass
 
 def mirror_style(df):
-    """數據照妖鏡：0 或 NaN 顯示紅色"""
+    """數據照妖鏡：修復版，0 或 NaN 顯示紅色"""
     if df is None or df.empty: return df
-    return df.style.applymap(lambda x: 'background-color: #FFCCCC; color: red;' if x == 0 or pd.isna(x) else '')
+    # 使用 Pandas 2.1.0+ 的 .map 而非 .applymap
+    return df.style.map(lambda x: 'background-color: #FFCCCC; color: red;' if x == 0 or pd.isna(x) else '')
 
 def strategy_style(df):
-    """策略漂亮漸層色"""
     if df is None or df.empty: return df
     return df.style.background_gradient(cmap='YlOrRd', subset=['現價'])
 
-def calc_and_save_atomic(ticker, name):
-    """💎 抓一筆、算一筆、存一筆 (鋼鐵邏輯)"""
+def calc_indicators(df):
+    """本地計算所有技術指標"""
+    df = df.rename(columns={'close':'Close','Trading_Volume':'Volume'})
+    df['Close'] = df['Close'].astype(float)
+    close = df['Close']; vol = df['Volume']
+    rsi = float(ta.rsi(close, length=14).iloc[-1]) if len(close) > 14 else 50
+    ma20 = close.rolling(20).mean().iloc[-1]; std = close.rolling(20).std().iloc[-1]
+    
+    return {
+        "price": close.iloc[-1],
+        "change_pct": ((close.iloc[-1] - close.iloc[-2])/close.iloc[-2])*100,
+        "sma5": close.rolling(5).mean().iloc[-1],
+        "ma20": ma20,
+        "ma60": close.rolling(60).mean().iloc[-1],
+        "rsi": rsi,
+        "vol": int(vol.iloc[-1]),
+        "avg_vol": int(vol.rolling(20).mean().iloc[-1]),
+        "kd20": close.iloc[-20], "kd60": close.iloc[-60],
+        "bbu": ma20 + (std*2), "bbl": ma20 - (std*2),
+        "high_20": close.shift(1).rolling(20).max().iloc[-1],
+        "vol_20": vol.shift(1).rolling(20).mean().iloc[-1],
+        "bb_width": (std*4)/ma20 if ma20 else 0
+    }
+
+def process_and_save(ticker, name, calc=True):
     cid = str(ticker).split('.')[0].strip()
-    start = (datetime.now(TW_TZ) - timedelta(days=160)).strftime('%Y-%m-%d')
     try:
-        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": "TaiwanStockPrice", "data_id": cid, "start_date": start, "token": FINMIND_TOKEN}, timeout=15).json()
+        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": "TaiwanStockPrice", "data_id": cid, "start_date": (datetime.now(TW_TZ)-timedelta(days=160)).strftime('%Y-%m-%d'), "token": FINMIND_TOKEN}, timeout=15).json()
         if r['msg'] != 'success' or not r['data']: return False
-        df = pd.DataFrame(r['data']).rename(columns={'close':'Close','Trading_Volume':'Volume'})
-        df['Close'] = df['Close'].astype(float)
+        raw_df = pd.DataFrame(r['data'])
         
-        # 💎 本地計算 SMA, MA, RSI, BB, KD
-        close = df['Close']; curr_p = close.iloc[-1]; prev_p = close.iloc[-2]; vol = df['Volume']
-        rsi = float(ta.rsi(close, length=14).iloc[-1]) if len(close) > 14 else 50
-        ma20 = close.rolling(20).mean().iloc[-1]; std = close.rolling(20).std().iloc[-1]
+        data = {"ticker": ticker, "stock_name": name, "scan_date": datetime.now(TW_TZ).date()}
+        if calc:
+            indicators = calc_indicators(raw_df)
+            data.update(indicators)
         
-        data = {
-            "ticker": ticker, "stock_name": name, "price": curr_p, "change_pct": ((curr_p - prev_p)/prev_p)*100,
-            "sma5": close.rolling(5).mean().iloc[-1], "ma20": ma20, "ma60": close.rolling(60).mean().iloc[-1],
-            "rsi": rsi, "vol": int(vol.iloc[-1]), "avg_vol": int(vol.rolling(20).mean().iloc[-1]),
-            "kd20": close.iloc[-20], "kd60": close.iloc[-60], "scan_date": datetime.now(TW_TZ).date(),
-            "bbu": ma20 + (std*2), "bbl": ma20 - (std*2), "high_20": close.shift(1).rolling(20).max().iloc[-1],
-            "vol_20": vol.shift(1).rolling(20).mean().iloc[-1], "bb_width": (std*4)/ma20 if ma20 else 0
-        }
         with engine.begin() as conn:
             conn.execute(text("""
                 INSERT INTO daily_scans (ticker, stock_name, price, change_pct, sma5, ma20, ma60, rsi, bbl, bbu, vol, avg_vol, scan_date, kd20, kd60, high_20, vol_20, bb_width)
@@ -88,93 +101,73 @@ def calc_and_save_atomic(ticker, name):
         return True
     except: return False
 
-def update_chip_atomic(ticker):
-    cid = str(ticker).split('.')[0].strip()
-    try:
-        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": "TaiwanStockHoldingSharesPer", "data_id": cid, "start_date": (datetime.now(TW_TZ)-timedelta(days=30)).strftime('%Y-%m-%d'), "token": FINMIND_TOKEN}).json()
-        fund = int(pd.DataFrame(r['data'])['InvestmentTrustHoldingShares'].iloc[-1] / 1000) if r['msg'] == 'success' and r['data'] else 0
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE daily_scans SET fund_count = :f WHERE ticker = :t AND scan_date = :d"), {"f": fund, "t": ticker, "d": datetime.now(TW_TZ).date()})
-        return True
-    except: return False
-
-def update_roe_atomic(ticker):
-    cid = str(ticker).split('.')[0].strip()
-    try:
-        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": "TaiwanStockFinancialStatements", "data_id": cid, "start_date": (datetime.now(TW_TZ)-timedelta(days=365)).strftime('%Y-%m-%d'), "token": FINMIND_TOKEN}).json()
-        roe = float(pd.DataFrame(r['data']).query("type=='ReturnOnEquityAftTax'")['value'].iloc[-1])/100 if r['msg'] == 'success' and r['data'] else 0
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE daily_scans SET roe = :r WHERE ticker = :t AND scan_date = :d"), {"r": roe, "t": ticker, "d": datetime.now(TW_TZ).date()})
-        return True
-    except: return False
-
-# ================= 3. 主介面設計 (V156.0) =================
-st.set_page_config(page_title="🛡️ 哲哲量子戰情室 Sponsor V156.0", layout="wide")
+# ================= 3. 主介面設計 (V157.0) =================
+st.set_page_config(page_title="🛡️ 哲哲量子戰情室 Sponsor V157.0", layout="wide")
 
 st.markdown("""<style>
     [data-testid="stBaseButton-secondary"] { width: 100% !important; height: 3.5em !important; font-size: 1.1rem !important; font-weight: 800 !important; border-radius: 10px !important; margin-bottom: 8px !important; background: linear-gradient(135deg, #FF3333 0%, #AA0000 100%) !important; color: white !important; }
     .big-font { font-size:60px !important; font-weight: 900; color: #FF3333; text-shadow: 2px 2px 4px #ddd; }
 </style>""", unsafe_allow_html=True)
 
-st.title("🛡️ 哲哲量子戰情室 Sponsor V156.0 — 終極核武版")
+st.title("🛡️ 哲哲量化戰情室 Sponsor V157.0 — 終極封神版")
 
-tab1, tab2, tab3 = st.tabs(["🚀 指揮中心", "💼 庫存戰略中心", "🛠️ 管理中心"])
+tab1, tab2, tab3 = st.tabs(["🚀 指揮中心", "💼 庫存股票戰略中心", "🛠️ 管理中心"])
 
 with tab1:
-    st.markdown("### 🏹 暴力數據連動 (Sponsor 6000)")
+    st.markdown("### 🏹 數據自動化抓取系統")
     c1, c2, c3, c4 = st.columns(4)
     pool = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
     today = datetime.now(TW_TZ).date()
-    
+
     with c1:
-        if st.button("🚀 每日行情：暴力重掃"):
-            pb = st.progress(0); st_txt = st.empty(); success = 0; fail = 0
+        if st.button("🚀 每日行情：暴力重掃股價"):
+            pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
             with ThreadPoolExecutor(max_workers=10) as exe:
-                futures = {exe.submit(calc_and_save_atomic, r['ticker'], r['stock_name']): r['ticker'] for _, r in pool.iterrows()}
-                for i, f in enumerate(as_completed(futures)):
-                    if f.result(): success += 1
-                    else: fail += 1
-                    pb.progress((i+1)/len(pool)); st_txt.text(f"🚀 進度: {i+1}/{len(pool)} | 成功: {success} 失敗: {fail}")
-            st.success(f"✅ 行情重掃完成！成功: {success}, 失敗: {fail}")
-            st.rerun()
+                futures = {exe.submit(process_and_save, r['ticker'], r['stock_name'], False): r['ticker'] for _, r in pool.iterrows()}
+                for i, fut in enumerate(as_completed(futures)):
+                    if fut.result(): s += 1
+                    else: f += 1
+                    pb.progress((i+1)/len(pool)); st_txt.text(f"🚀 進度: {i+1}/{len(pool)} | 成功: {s} 失敗: {f}")
+            st.success(f"✅ 完成！成功: {s}, 失敗: {f}"); st.rerun()
 
     with c2:
-        if st.button("🔄 補救掃描：補漏+計算"):
+        if st.button("🔄 補救掃描：補漏+本地計算"):
             done = pd.read_sql(text("SELECT ticker FROM daily_scans WHERE scan_date = :t AND price > 0"), con=engine, params={"t": today})
             missing = pool[~pool['ticker'].isin(done['ticker'].tolist())]
-            if missing.empty: st.info("🎯 數據已全壘打！")
+            if missing.empty: st.info("🎯 今日數據已全數就位！")
             else:
-                pb = st.progress(0); st_txt = st.empty(); success = 0; fail = 0
+                pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
                 with ThreadPoolExecutor(max_workers=10) as exe:
-                    futures = {exe.submit(calc_and_save_atomic, r['ticker'], r['stock_name']): r['ticker'] for _, r in missing.iterrows()}
-                    for i, f in enumerate(as_completed(futures)):
-                        if f.result(): success += 1
-                        else: fail += 1
-                        pb.progress((i+1)/len(missing)); st_txt.text(f"🔄 補抓: {i+1}/{len(missing)} | 成功: {success} 失敗: {fail}")
-                st.success(f"✅ 補救完成！成功: {success}, 失敗: {fail}")
-                st.rerun()
+                    futures = {exe.submit(process_and_save, r['ticker'], r['stock_name'], True): r['ticker'] for _, r in missing.iterrows()}
+                    for i, fut in enumerate(as_completed(futures)):
+                        if fut.result(): s += 1
+                        else: f += 1
+                        pb.progress((i+1)/len(missing)); st_txt.text(f"🔄 進度: {i+1}/{len(missing)} | 成功: {s} 失敗: {f}")
+                st.success(f"✅ 完成！成功: {s}, 失敗: {f}"); st.rerun()
 
     with c3:
-        if st.button("💼 每週/月：籌碼補完"):
-            pb = st.progress(0); st_txt = st.empty(); success = 0; fail = 0
+        if st.button("💼 籌碼補完：投信持股"):
+            from dashboard import update_chip_atomic # 假設函數在同檔
+            pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
             with ThreadPoolExecutor(max_workers=10) as exe:
                 futures = {exe.submit(update_chip_atomic, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
-                for i, f in enumerate(as_completed(futures)):
-                    if f.result(): success += 1
-                    else: fail += 1
-                    pb.progress((i+1)/len(pool)); st_txt.text(f"💼 籌碼: {i+1}/{len(pool)} | 成功: {success} 失敗: {fail}")
-            st.success(f"✅ 籌碼更新完成！成功: {success}")
+                for i, fut in enumerate(as_completed(futures)):
+                    if fut.result(): s += 1
+                    else: f += 1
+                    pb.progress((i+1)/len(pool)); st_txt.text(f"💼 進度: {i+1}/{len(pool)} | 成功: {s} 失敗: {f}")
+            st.success(f"✅ 完成！成功: {s}")
 
     with c4:
-        if st.button("💎 每季：財報精算"):
-            pb = st.progress(0); st_txt = st.empty(); success = 0; fail = 0
+        if st.button("💎 財報精算：ROE 同步"):
+            from dashboard import update_roe_atomic # 假設函數在同檔
+            pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
             with ThreadPoolExecutor(max_workers=10) as exe:
                 futures = {exe.submit(update_roe_atomic, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
-                for i, f in enumerate(as_completed(futures)):
-                    if f.result(): success += 1
-                    else: fail += 1
-                    pb.progress((i+1)/len(pool)); st_txt.text(f"💎 財報: {i+1}/{len(pool)} | 成功: {success} 失敗: {fail}")
-            st.success(f"✅ 財報更新完成！成功: {success}")
+                for i, fut in enumerate(as_completed(futures)):
+                    if fut.result(): s += 1
+                    else: f += 1
+                    pb.progress((i+1)/len(pool)); st_txt.text(f"💎 進度: {i+1}/{len(pool)} | 成功: {s} 失敗: {f}")
+            st.success(f"✅ 完成！成功: {s}")
 
     st.divider()
     c_read, c_mirror, c_del = st.columns([1, 1, 1])
@@ -185,7 +178,7 @@ with tab1:
                 st.session_state['master_df'] = df.rename(columns={'change_pct': '漲跌(%)', 'price':'現價', 'ticker':'代號', 'stock_name':'名稱'})
                 st.success(f"✅ 已載入 {len(df)} 檔真錢標的")
     with c_mirror:
-        if st.button("🔍 數據照妖鏡 (紅字異常)"):
+        if st.button("🔍 數據照妖鏡 (紅字報警)"):
             all_data = pd.read_sql(text("SELECT * FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": today})
             st.dataframe(mirror_style(all_data), width=1500)
     with c_del:
@@ -194,7 +187,7 @@ with tab1:
             st.rerun()
 
     if 'master_df' in st.session_state:
-        st.markdown("### 🔥 七大金剛策略中心 (LINE 連動)")
+        st.markdown("### 🔥 七大金剛策略中心 (漂亮漸層 + LINE)")
         df = st.session_state['master_df']
         s_list = [
             ("💎 策略 1: 超級策略 (基金+ROE)", "(df['fund_count'] >= 10) & (df['roe'] > 0.05)"),
@@ -213,14 +206,14 @@ with tab2:
     st.header("💼 庫存股票戰略中心")
     df_p = pd.read_sql("SELECT ticker, stock_name, entry_price, qty FROM portfolio", con=engine)
     if not df_p.empty:
-        if st.button("🔄 庫存行情更新與精算", key="update_port_btn"):
-            pb_p = st.progress(0); success_p = 0
+        if st.button("🔄 同步對應庫存最新行情+損益"):
+            pb_p = st.progress(0); s_p = 0
             with ThreadPoolExecutor(max_workers=10) as exe:
-                futures = {exe.submit(calc_and_save_atomic, r['ticker'], r['stock_name']): r['ticker'] for _, r in df_p.iterrows()}
-                for i, f in enumerate(as_completed(futures)):
-                    if f.result(): success_p += 1
+                futures = {exe.submit(process_and_save, r['ticker'], r['stock_name'], True): r['ticker'] for _, r in df_p.iterrows()}
+                for i, fut in enumerate(as_completed(futures)):
+                    if fut.result(): s_p += 1
                     pb_p.progress((i+1)/len(df_p))
-            st.success(f"✅ 庫存行情同步成功: {success_p} 檔"); st.rerun()
+            st.success(f"✅ 同步成功: {s_p} 檔"); st.rerun()
 
         p_prices = pd.read_sql(text("SELECT * FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": today})
         df_display = pd.merge(df_p, p_prices, on='ticker', how='left').fillna(0)
@@ -231,7 +224,7 @@ with tab2:
         st.dataframe(df_display.style.background_gradient(cmap='RdYlGn', subset=['報酬率(%)']), width=1500)
         
         st.divider()
-        st.markdown("### 💀 四大賣股策略 (LINE 連動)")
+        st.markdown("### 💀 四大賣股策略 (漂亮漸層 + LINE)")
         m_c = st.columns(4)
         sell_btns = [("💀 均線死叉", "df_display['sma5'] < df_display['ma20']"), ("🔥 RSI 過熱", "df_display['rsi'] > 80"), ("💰 利潤止盈", "df_display['報酬率(%)'] > 15"), ("📉 破位停損", "df_display['報酬率(%)'] < -10")]
         for j, (s_name, s_cond) in enumerate(sell_btns):
@@ -249,11 +242,13 @@ with tab3:
             df_new.columns = df_new.columns.str.lower().str.strip()
             with engine.begin() as conn:
                 conn.execute(text("DELETE FROM stock_pool")); df_new.to_sql('stock_pool', con=conn, if_exists='append', index=False)
-            st.success("✅ 股票池去重更新成功")
+            st.success("✅ 更新成功")
         if st.button("🗑️ 清空股票池"):
             with engine.begin() as conn: conn.execute(text("DELETE FROM stock_pool"))
             st.rerun()
-        st.download_button("📥 下載股票池範例", data="ticker,stock_name\n2330,台積電\n2317,鴻海", file_name="pool_sample.csv")
+        # 提供範例下載
+        csv_pool = "ticker,stock_name\n2330,台積電\n2317,鴻海"
+        st.download_button("📥 下載股票池範例 CSV", data=csv_pool, file_name="sample_pool.csv", mime="text/csv")
 
     with c2:
         st.markdown("#### 庫存股票管理")
@@ -263,7 +258,9 @@ with tab3:
             df_new.columns = df_new.columns.str.lower().str.strip()
             with engine.begin() as conn:
                 conn.execute(text("DELETE FROM portfolio")); df_new.to_sql('portfolio', con=conn, if_exists='append', index=False)
-            st.success("✅ 庫存覆蓋成功")
-        st.download_button("📥 下載庫存範例", data="ticker,stock_name,entry_price,qty\n2330,台積電,600,1000\n2317,鴻海,100,500", file_name="portfolio_sample.csv")
+            st.success("✅ 覆蓋成功")
+        # 提供範例下載
+        csv_port = "ticker,stock_name,entry_price,qty\n2330,台積電,600,1000\n2317,鴻海,100,500"
+        st.download_button("📥 下載庫存範例 CSV", data=csv_port, file_name="sample_portfolio.csv", mime="text/csv")
 
-st.caption("本系統由哲哲團隊開發。V156.0 Sponsor 終極核武版，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。V157.0 Sponsor 旗艦封神版，贏到流湯不是夢！")
