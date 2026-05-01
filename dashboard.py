@@ -57,7 +57,7 @@ def send_line_notif(title, df, action_type="買入"):
     if df is None or df.empty: return
     icon = "🎯" if action_type == "買入" else "⚠️"
     msg = f"{icon}【哲哲戰報 - {title}】\n📢 跟我預測的一模一樣，準備賺到流湯！\n"
-    for _, r in df.head(10).iterrows():
+    for _, r in df.head(5).iterrows():
         t = r.get('代號', r.get('ticker', ''))
         n = r.get('名稱', r.get('stock_name', ''))
         p = r.get('現價', r.get('price', '0'))
@@ -71,19 +71,20 @@ def process_and_save(ticker, name):
     if df is None or len(df) < 20: return False
     close = df['Close']; curr_p = close.iloc[-1]; prev_p = close.iloc[-2]; vol = df['Volume']
     std = close.rolling(20).std().iloc[-1]
+    ma20 = close.rolling(20).mean().iloc[-1]
     data = {
         "ticker": ticker, "stock_name": name, "price": curr_p, "change_pct": ((curr_p - prev_p)/prev_p)*100,
-        "sma5": close.rolling(5).mean().iloc[-1], "ma20": close.rolling(20).mean().iloc[-1],
+        "sma5": close.rolling(5).mean().iloc[-1], "ma20": ma20,
         "ma60": close.rolling(60).mean().iloc[-1], "rsi": 50, "vol": int(vol.iloc[-1]),
         "avg_vol": int(vol.rolling(20).mean().iloc[-1]), "kd20": close.iloc[-20], "kd60": close.iloc[-60],
-        "scan_date": datetime.now(TW_TZ).date(), "bbu": close.rolling(20).mean().iloc[-1] + (std*2),
-        "bbl": close.rolling(20).mean().iloc[-1] - (std*2), "high_20": close.shift(1).rolling(20).max().iloc[-1],
-        "vol_20": vol.shift(1).rolling(20).mean().iloc[-1], "bb_width": (std*4)/close.rolling(20).mean().iloc[-1] if std else 0,
+        "scan_date": datetime.now(TW_TZ).date(), "bbu": ma20 + (std*2),
+        "bbl": ma20 - (std*2), "high_20": close.shift(1).rolling(20).max().iloc[-1],
+        "vol_20": vol.shift(1).rolling(20).mean().iloc[-1], "bb_width": (std*4)/ma20 if ma20 else 0,
         "roe": 0, "rev_growth": 0
     }
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM daily_scans WHERE ticker = :t AND scan_date = :d"), {"t": ticker, "d": data['scan_date']})
-        pd.DataFrame([data]).to_sql('daily_scans', con=engine, if_exists='append', index=False)
+        pd.DataFrame([data]).to_sql('daily_scans', con=conn, if_exists='append', index=False)
     return True
 
 # ================= 3. 視覺渲染 (按鈕置中全幅 CSS) =================
@@ -96,8 +97,8 @@ def beauty_style(df):
     f_map = {'現價': '{:.2f}', '漲跌(%)': '{:+.2f}%', '獲利': '{:,.0f}', '報酬率(%)': '{:+.2f}%', 'entry_price':'{:.2f}', 'price':'{:.2f}'}
     return df.style.format({k: v for k, v in f_map.items() if k in df.columns}, na_rep='-')
 
-# ================= 4. 主介面設計 (V140.0 鋼鐵最終體) =================
-st.set_page_config(page_title="哲哲量子封神 V140.0", layout="wide")
+# ================= 4. 主介面設計 (V142.0 最終體) =================
+st.set_page_config(page_title="哲哲量子封神 V142.0", layout="wide")
 
 st.markdown("""<style>
     [data-testid="stBaseButton-secondary"] {
@@ -111,12 +112,12 @@ st.markdown("""<style>
     .big-font { font-size:60px !important; font-weight: 900; color: #FF3333; text-shadow: 2px 2px 4px #ddd; }
 </style>""", unsafe_allow_html=True)
 
-st.title("🛡️ 哲哲量化戰情室 V140.0 — 鋼鐵最終奧義完全體")
+st.title("🛡️ 哲哲量化戰情室 V142.0 — 鋼鐵無敵全功能版")
 
-tab1, tab2, tab3 = st.tabs(["🚀 七大金剛指揮中心", "💼 資產即時戰報", "🛠️ 後台管理"])
+tab1, tab2, tab3 = st.tabs(["🚀 七大金剛指揮中心", "💼 資產即時戰報", "🛠️ 管理中心"])
 
 with tab1:
-    st.markdown("### 🏆 行情掃描 (分母動態連動)")
+    st.markdown("### 🏆 行情掃描 (分母與股票池同步)")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("📡 讀取今日數據快取", key="read_cache"):
@@ -135,7 +136,6 @@ with tab1:
     st.divider()
     st.markdown("### 🔥 買股必勝發射台 (七大金剛歸位)")
     
-    # 七大金剛全代碼回歸
     strategies = [
         ("💎 策略 1: 降臨：超級策略 (基金+ROE+營收)", "(df['fund_count'] >= 100)"),
         ("📈 策略 2: 帶量突破前高 (圖一)", "(df['現價'] > df['high_20']) & (df['vol'] > df['vol_20'] * 1.5)"),
@@ -172,7 +172,7 @@ with tab2:
         st.markdown(f"當前總獲利：<br><span class='big-font'>${df_display['獲利'].sum():,.0f}</span>", unsafe_allow_html=True)
         st.dataframe(beauty_style(df_display), width=1500)
         
-        m_c = st.columns(5)
+        m_c = st.columns(4)
         sell_btns = [("💀 均線死叉", "sma5 < ma20"), ("🔥 RSI 過熱", "rsi > 80"), ("💰 利潤止盈", "報酬率 > 20"), ("📉 破位停損", "報酬率 < -10")]
         for j, (s_name, s_cond) in enumerate(sell_btns):
             if m_c[j].button(s_name):
@@ -185,13 +185,12 @@ with tab3:
         f1 = st.file_uploader("上傳股票池 CSV", type="csv", key="pool_up")
         if f1 and st.button("💾 匯入股票池 (自動去重)"):
             df_new = pd.read_csv(f1, encoding='utf-8-sig')
-            # 💎 修正：Header 自動校準 + 鋼鐵去重
             df_new.columns = df_new.columns.str.strip().str.lower()
             if 'ticker' in df_new.columns:
                 df_new = df_new.drop_duplicates(subset=['ticker'])
                 with engine.begin() as conn:
                     conn.execute(text("DELETE FROM stock_pool"))
-                    df_new.to_sql('stock_pool', con=engine, if_exists='append', index=False)
+                    df_new.to_sql('stock_pool', con=conn, if_exists='append', index=False)
                 st.success(f"✅ 成功匯入 {len(df_new)} 檔標的")
             else: st.error("❌ 找不到 'ticker' 欄位，請檢查 CSV 標頭！")
     with col2:
@@ -203,8 +202,8 @@ with tab3:
                 df_new = df_new.drop_duplicates(subset=['ticker'])
                 with engine.begin() as conn:
                     conn.execute(text("DELETE FROM portfolio"))
-                    df_new.to_sql('portfolio', con=engine, if_exists='append', index=False)
+                    df_new.to_sql('portfolio', con=conn, if_exists='append', index=False)
                 st.success("資產更新成功！")
             else: st.error("❌ 找不到 'ticker' 欄位！")
 
-st.caption("本系統由哲哲團隊開發。V140.0 鋼鐵最終奧義版，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。V142.0 鋼鐵最終奧義版，賺到流湯不要忘了我！")
