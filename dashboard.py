@@ -6,19 +6,20 @@ from datetime import datetime, timedelta
 import pytz
 import numpy as np
 
-# ================= 1. 系統地基 (五表鎖死) =================
+# ================= 1. 系統地基 (五表鎖死，修復衝突) =================
 try:
     TW_TZ = pytz.timezone('Asia/Taipei')
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
     engine = create_engine(DB_URL, connect_args={"charset": "utf8mb4", "connect_timeout": 30}, pool_pre_ping=True)
     
-    # 💎 核心 Secret 讀取
+    # 💎 核心 API Token 與 LINE 資訊
     FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoibG92ZTUyMTUiLCJlbWFpbCI6ImNocmlzNTIxNUBnbWFpbC5jb20ifQ.yeh3T_iNCA4IWmlsPZHHyVUbMOH_qe35stdLgIv9ONY"
     LINE_TOKEN = st.secrets["LINE_CHANNEL_ACCESS_TOKEN"]
     USER_ID = st.secrets["YOUR_LINE_USER_ID"]
     
     with engine.connect() as conn:
         conn.execute(text("SET NAMES utf8mb4;"))
+        # 行情表
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS daily_scans (
                 ticker VARCHAR(20), stock_name VARCHAR(50), price FLOAT, change_pct FLOAT, 
@@ -29,13 +30,14 @@ try:
                 PRIMARY KEY (ticker, scan_date)
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
         """))
+        # 股票池與資產表
         conn.execute(text("CREATE TABLE IF NOT EXISTS stock_pool (ticker VARCHAR(20) PRIMARY KEY, stock_name VARCHAR(50), sector VARCHAR(50), fund_count INT DEFAULT 0);"))
         conn.execute(text("CREATE TABLE IF NOT EXISTS portfolio (ticker VARCHAR(20) PRIMARY KEY, stock_name VARCHAR(50), entry_price FLOAT, qty FLOAT);"))
         conn.commit()
 except Exception as e:
     st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (FinMind 引擎 & LINE) =================
+# ================= 2. 核心大腦 (FinMind 暴力引擎 & LINE) =================
 
 def get_finmind_data(ticker):
     clean_ticker = ticker.split('.')[0]
@@ -56,7 +58,7 @@ def get_finmind_data(ticker):
 def send_line_notif(title, df, action_type="買入"):
     if df is None or df.empty: return
     icon = "🎯" if action_type == "買入" else "⚠️"
-    msg = f"{icon}【哲哲戰報 - {title}】\n📢 跟我預測的一模一樣，賺到流湯！\n"
+    msg = f"{icon}【哲哲戰報 - {title}】\n📢 跟我預測的一模一樣，準備賺到流湯！\n"
     for _, r in df.head(5).iterrows():
         t = r.get('代號', r.get('ticker', ''))
         p = r.get('現價', r.get('price', '0'))
@@ -86,37 +88,44 @@ def process_and_save(ticker, name):
         pd.DataFrame([data]).to_sql('daily_scans', con=engine, if_exists='append', index=False)
     return True
 
-# ================= 3. 視覺渲染 (置中全幅 CSS) =================
+# ================= 3. 視覺渲染 (修正按鈕高度與寬度) =================
 
 def beauty_style(df):
     if df.empty: return df
-    num_cols = ['現價','漲跌(%)','獲利','報酬率(%)','entry_price','price','ROE']
+    num_cols = ['現價','漲跌(%)','獲利','報酬率(%)','entry_price','price']
     for c in num_cols:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-    f_map = {'現價': '{:.2f}', '漲跌(%)': '{:+.2f}%', '獲利': '{:,.0f}', '報酬率(%)': '{:+.2f}%', 'entry_price':'{:.2f}', 'price':'{:.2f}', 'ROE':'{:.2%}'}
+    f_map = {'現價': '{:.2f}', '漲跌(%)': '{:+.2f}%', '獲利': '{:,.0f}', '報酬率(%)': '{:+.2f}%', 'entry_price':'{:.2f}', 'price':'{:.2f}'}
     return df.style.format({k: v for k, v in f_map.items() if k in df.columns}, na_rep='-')
 
-# ================= 4. 主介面設計 (V137.0 策略全回歸版) =================
-st.set_page_config(page_title="哲哲量子封神 V137.0", layout="wide")
+# ================= 4. 主介面設計 (V138.0 戰神修正版) =================
+st.set_page_config(page_title="哲哲量子封神 V138.0", layout="wide")
 
+# 💎 CSS 修正：按鈕全幅但高度適中
 st.markdown("""<style>
     [data-testid="stBaseButton-secondary"] {
-        width: 100% !important; height: 5.5em !important; font-size: 1.5rem !important; 
-        font-weight: 800 !important; border-radius: 20px !important; margin-bottom: 15px !important; 
-        background: linear-gradient(135deg, #FF3333 0%, #AA0000 100%) !important; color: white !important;
-        border: none !important; display: flex !important; justify-content: center !important; align-items: center !important;
-        transition: 0.3s;
+        width: 100% !important; 
+        height: 3.8em !important; /* 修正：高度從 5.5 縮減為 3.8，更為精悍 */
+        font-size: 1.4rem !important; /* 修正：字體微縮，避免視覺壓迫 */
+        font-weight: 800 !important; 
+        border-radius: 12px !important; 
+        margin-bottom: 12px !important; 
+        background: linear-gradient(135deg, #FF3333 0%, #AA0000 100%) !important; 
+        color: white !important;
+        border: none !important; 
+        display: flex !important; justify-content: center !important; align-items: center !important;
+        transition: 0.2s;
     }
-    [data-testid="stBaseButton-secondary"]:hover { transform: scale(1.02); box-shadow: 0 10px 20px rgba(255,51,51,0.5) !important; }
-    .big-font { font-size:65px !important; font-weight: 900; color: #FF3333; text-shadow: 3px 3px 6px #ddd; }
+    [data-testid="stBaseButton-secondary"]:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(255,51,51,0.4) !important; }
+    .big-font { font-size:60px !important; font-weight: 900; color: #FF3333; text-shadow: 3px 3px 6px #ddd; }
 </style>""", unsafe_allow_html=True)
 
-st.title("🛡️ 哲哲量化戰情室 V137.0 — 全策略回歸完全體")
+st.title("🛡️ 哲哲量化戰情室 V138.0 — 鋼鐵修正完全體")
 
 tab1, tab2, tab3 = st.tabs(["🚀 七大金剛指揮中心", "💼 資產即時戰報", "🛠️ 後台管理"])
 
 with tab1:
-    st.markdown("### 🏆 法人級數據量子掃描")
+    st.markdown("### 🏆 法人數據量子掃描")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("📡 讀取今日數據快取", key="read_db"):
@@ -135,57 +144,31 @@ with tab1:
     st.divider()
     st.markdown("### 🔥 買股必勝發射台 (七大金剛)")
     
-    if st.button("💎 策略 1: 降臨：超級策略 (基金+ROE+營收)", key="s1"):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df'].copy()
-            p_info = pd.read_sql("SELECT ticker, fund_count, sector FROM stock_pool", con=engine)
-            df = pd.merge(df, p_info, left_on='代號', right_on='ticker', how='left')
-            res = df[df['fund_count'] >= 100]
-            st.dataframe(beauty_style(res), width="stretch")
-            send_line_notif("超級策略", res, "買入")
-
-    if st.button("📈 策略 2: 帶量突破前高 (圖一)", key="s2"):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df']
-            res = df[(df['現價'] > df['high_20']) & (df['vol'] > df['vol_20'] * 1.5)]
-            st.dataframe(beauty_style(res), width="stretch")
-            send_line_notif("帶量突破", res, "買入")
-
-    if st.button("🚀 策略 3: 三線合一多頭 (圖二)", key="s3"):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df']
-            res = df[(df['sma5'] > df['ma20']) & (df['ma20'] > df['ma60'])]
-            st.dataframe(beauty_style(res), width="stretch")
-            send_line_notif("三線合一", res, "買入")
-
-    if st.button("🌀 策略 4: 布林縮口突破 (圖三)", key="s4"):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df']
-            res = df[(df['現價'] > df['bbu']) & (df['bb_width'] < 0.2)]
-            st.dataframe(beauty_style(res), width="stretch")
-
-    if st.button("👑 策略 5: 九成勝率 ATM", key="s5"):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df']
-            res = df[(df['現價'] > df['kd20']) & (df['vol'] >= df['vol_20'] * 1.2)]
-            st.dataframe(beauty_style(res), width="stretch")
-
-    if st.button("🛡️ 策略 6: 低階抄底防護", key="s6"):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df']
-            res = df[(df['rsi'] < 35) & (df['現價'] > df['sma5'])]
-            st.dataframe(beauty_style(res), width="stretch")
-
-    if st.button("🎯 策略 7: 強勢回測支撐", key="s7"):
-        if 'master_df' in st.session_state:
-            df = st.session_state['master_df']
-            res = df[abs(df['現價']-df['ma20'])/df['ma20'] < 0.02]
-            st.dataframe(beauty_style(res), width="stretch")
+    # 七大金剛策略按鈕
+    strategy_list = [
+        ("💎 策略 1: 降臨：超級策略 (基金+ROE+營收)", "(df['fund_count'] >= 100)"),
+        ("📈 策略 2: 帶量突破前高 (圖一)", "(df['現價'] > df['high_20']) & (df['vol'] > df['vol_20'] * 1.5)"),
+        ("🚀 策略 3: 三線合一多頭 (圖二)", "(df['sma5'] > df['ma20']) & (df['ma20'] > df['ma60'])"),
+        ("🌀 策略 4: 布林縮口突破 (圖三)", "(df['現價'] > df['bbu']) & (df['bb_width'] < 0.2)"),
+        ("👑 策略 5: 九成勝率 ATM", "(df['現價'] > df['kd20']) & (df['vol'] >= df['vol_20'] * 1.2)"),
+        ("🛡️ 策略 6: 低階抄底防護", "(df['rsi'] < 35) & (df['現價'] > df['sma5'])"),
+        ("🎯 策略 7: 強勢回測支撐", "abs(df['現價']-df['ma20'])/df['ma20'] < 0.02")
+    ]
+    
+    for i, (name, cond) in enumerate(strategy_list):
+        if st.button(name, key=f"strat_{i}"):
+            if 'master_df' in st.session_state:
+                df = st.session_state['master_df'].copy()
+                p_info = pd.read_sql("SELECT ticker, fund_count, sector FROM stock_pool", con=engine)
+                df = pd.merge(df, p_info, left_on='代號', right_on='ticker', how='left')
+                res = df[eval(cond)]
+                st.dataframe(beauty_style(res), width=1200) # 修正寬度
+                send_line_notif(name, res, "買入")
 
     st.divider()
     if st.button("🔍 揭開底牌：數據照妖鏡 (檢視所有抓到數據)", key="data_mirror"):
         if 'master_df' in st.session_state:
-            st.dataframe(beauty_style(st.session_state['master_df']), width="stretch")
+            st.dataframe(beauty_style(st.session_state['master_df']), width=1200)
 
 with tab2:
     st.header("💼 我的資產即時戰報")
@@ -196,9 +179,7 @@ with tab2:
         df_display['獲利'] = np.where(df_display['price'] > 0, (df_display['price'] - df_display['entry_price']) * df_display['qty'], 0)
         df_display['報酬率(%)'] = np.where(df_display['price'] > 0, ((df_display['price'] - df_display['entry_price']) / df_display['entry_price']) * 100, 0)
         st.markdown(f"當前總獲利：<br><span class='big-font'>${df_display['獲利'].sum():,.0f}</span>", unsafe_allow_html=True)
-        st.dataframe(beauty_style(df_display), width="stretch")
-        if st.button("⚠️ 一鍵啟動賣出決策通報"):
-            send_line_notif("急訊：建議減碼", df_display[df_display['報酬率(%)'] < -5], "賣出")
+        st.dataframe(beauty_style(df_display), width=1200)
 
 with tab3:
     st.subheader("🛠️ 管理中心")
@@ -207,11 +188,20 @@ with tab3:
         f1 = st.file_uploader("上傳股票池 CSV", type="csv", key="up_pool")
         if f1 and st.button("💾 匯入股票池"):
             df_new = pd.read_csv(f1, encoding='utf-8-sig')
-            df_new.to_sql('stock_pool', con=engine, if_exists='replace', index=False); st.success("成功！")
+            # 💎 修正：鋼鐵去重，避免代號重複導致資料庫炸掉
+            df_new = df_new.drop_duplicates(subset=['ticker'])
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM stock_pool")) # 先清空，解決 IntegrityError
+                df_new.to_sql('stock_pool', con=engine, if_exists='append', index=False)
+            st.success(f"✅ 成功匯入 {len(df_new)} 檔標的 (已自動去重)")
     with col2:
         f2 = st.file_uploader("上傳持倉 CSV", type="csv", key="up_port")
         if f2 and st.button("💾 匯入持倉"):
             df_new = pd.read_csv(f2, encoding='utf-8-sig')
-            df_new.to_sql('portfolio', con=engine, if_exists='replace', index=False); st.success("資產更新成功！")
+            df_new = df_new.drop_duplicates(subset=['ticker'])
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM portfolio"))
+                df_new.to_sql('portfolio', con=engine, if_exists='append', index=False)
+            st.success("資產更新成功！")
 
-st.caption("本系統由哲哲團隊開發。V137.0 最終回歸版，賺到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。V138.0 鋼鐵修正版，賺到流湯不要忘了我！")
