@@ -24,7 +24,7 @@ try:
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
     engine = create_engine(DB_URL, connect_args={"charset": "utf8mb4", "connect_timeout": 30}, pool_pre_ping=True)
     
-    FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2Vy_idIjoibG92ZTUyMTUiLCJlbWFpbCI6ImNocmlzNTIxNUBnbWFpbC5jb20ifQ.yeh3T_iNCA4IWmlsPZHHyVUbMOH_qe35stdLgIv9ONY"
+    FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoibG92ZTUyMTUiLCJlbWFpbCI6ImNocmlzNTIxNUBnbWFpbC5jb20ifQ.yeh3T_iNCA4IWmlsPZHHyVUbMOH_qe35stdLgIv9ONY"
     
     with engine.connect() as conn:
         conn.execute(text("SET NAMES utf8mb4;"))
@@ -51,15 +51,39 @@ if 'scan_status' not in st.session_state:
 
 # ================= 2. 核心大腦 (地毯式挖掘與暴力精算) =================
 
-def fetch_fm(dataset, ticker, start_days=160):
-    """通用 API 抓取模組"""
+def def fetch_fm(dataset, ticker, start_days=160):
+    """通用 API 抓取模組 (修復 Token 驗證與 Headers 傳遞)"""
     cid = str(ticker).split('.')[0].strip()
     start = (datetime.datetime.now(TW_TZ) - datetime.timedelta(days=start_days)).strftime('%Y-%m-%d')
     try:
-        r = requests.get("https://api.finmindtrade.com/api/v4/data", 
-                         params={"dataset": dataset, "data_id": cid, "start_date": start, "token": FINMIND_TOKEN}, timeout=15).json()
-        return pd.DataFrame(r['data']) if r.get('msg') == 'success' and r.get('data') else None
-    except: return None
+        url = "https://api.finmindtrade.com/api/v4/data"
+        
+        # 參數不要放 token
+        params = {
+            "dataset": dataset, 
+            "data_id": cid, 
+            "start_date": start
+        }
+        
+        # 🚨 關鍵修正：Token 必須放在 Headers 裡面，並加上 Bearer！
+        headers = {
+            "Authorization": f"Bearer {FINMIND_TOKEN}"
+        }
+        
+        # 發送請求時把 headers 帶進去
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        r = response.json()
+        
+        if r.get('msg') == 'success' and r.get('data'):
+            return pd.DataFrame(r['data'])
+        else:
+            # 報錯機制保留，如果還是失敗會告訴你真正原因
+            st.error(f"❌ API 拒絕 [{dataset}]: {r.get('msg')}")
+            return None
+            
+    except Exception as e:
+        st.error(f"❌ 網路連線錯誤 [{dataset}]: {e}")
+        return None
 
 def update_chip_v_quantum(ticker):
     """💎 籌碼量子修正：強效容錯版 (抓取60天內投信淨買超總和)"""
