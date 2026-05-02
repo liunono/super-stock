@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas_ta as ta
 import io
 
-# ================= 1. 系統地基 (API 加壓與防報錯) =================
+# ================= 1. 系統地基 (五表鎖死 & API 授權) =================
 try:
     TW_TZ = pytz.timezone('Asia/Taipei')
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
@@ -34,7 +34,26 @@ try:
 except Exception as e:
     st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (數據歸位：ROE 730天, 籌碼 60天) =================
+# ================= 2. 核心診斷函數 (量子除錯實驗室) =================
+
+def debug_raw_api(ticker):
+    """🧪 直接噴出原始數據，看看主力在搞什麼鬼"""
+    cid = str(ticker).split('.')[0].strip()
+    # ROE 抓 1 年就夠了，關鍵是 type 要對
+    start_roe = (datetime.datetime.now(TW_TZ) - datetime.timedelta(days=400)).strftime('%Y-%m-%d')
+    start_chip = (datetime.datetime.now(TW_TZ) - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
+    
+    roe_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockFinancialStatements&data_id={cid}&start_date={start_roe}&token={FINMIND_TOKEN}"
+    chip_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockHoldingSharesPer&data_id={cid}&start_date={start_chip}&token={FINMIND_TOKEN}"
+    
+    try:
+        r_roe = requests.get(roe_url, timeout=10).json()
+        r_chip = requests.get(chip_url, timeout=10).json()
+        return r_roe, r_chip
+    except Exception as e:
+        return {"error": str(e)}, {"error": str(e)}
+
+# ================= 3. 修正後的數據抓取 (ROE 730天, 籌碼 60天) =================
 
 def fetch_fm(dataset, ticker, start_days=160):
     cid = str(ticker).split('.')[0].strip()
@@ -43,6 +62,36 @@ def fetch_fm(dataset, ticker, start_days=160):
         r = requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": dataset, "data_id": cid, "start_date": start, "token": FINMIND_TOKEN}, timeout=15).json()
         return pd.DataFrame(r['data']) if r['msg'] == 'success' and r['data'] else None
     except: return None
+
+def update_chip_v4(ticker):
+    """💎 籌碼歸位：精準鎖定投信張數"""
+    df = fetch_fm("TaiwanStockHoldingSharesPer", ticker, 60)
+    fund = None
+    if df is not None and not df.empty:
+        # FinMind 欄位包含：InternationalQuasiShareholding, InvestmentTrustHoldingShares 等
+        if 'InvestmentTrustHoldingShares' in df.columns:
+            valid = df[df['InvestmentTrustHoldingShares'] > 0]
+            if not valid.empty:
+                fund = int(valid.iloc[-1]['InvestmentTrustHoldingShares'] / 1000)
+            else:
+                fund = 0
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE daily_scans SET fund_count = :f WHERE ticker = :t AND scan_date = :d"), {"f": fund, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
+    return True if fund is not None else False
+
+def update_roe_v4(ticker):
+    """💎 財報歸位：兩年搜尋，精準鎖定稅後 ROE"""
+    df = fetch_fm("TaiwanStockFinancialStatements", ticker, 730)
+    roe = None
+    if df is not None and not df.empty:
+        # 關鍵：FinMind 的 type 必須完全符合
+        r_row = df[df['type'] == 'ReturnOnEquityAftTax']
+        if not r_row.empty:
+            val = float(r_row.iloc[-1]['value'])
+            roe = val / 100 if abs(val) > 1 else val
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE daily_scans SET roe = :r WHERE ticker = :t AND scan_date = :d"), {"r": roe, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
+    return True if roe is not None else False
 
 def calc_and_save_full(ticker, name):
     """行情與本地計算 (MA, RSI, BB, KD)"""
@@ -67,46 +116,22 @@ def calc_and_save_full(ticker, name):
             ON DUPLICATE KEY UPDATE price=VALUES(price), change_pct=VALUES(change_pct), sma5=VALUES(sma5), ma20=VALUES(ma20), rsi=VALUES(rsi), vol=VALUES(vol), avg_vol=VALUES(avg_vol), bb_width=VALUES(bb_width)"""), data)
     return True
 
-def update_chip_v3(ticker):
-    """籌碼歸位：60天深度搜尋，排除 0 值"""
-    df = fetch_fm("TaiwanStockHoldingSharesPer", ticker, 60)
-    fund = None
-    if df is not None and not df.empty:
-        valid = df[df['InvestmentTrustHoldingShares'] > 0]
-        if not valid.empty: fund = int(valid['InvestmentTrustHoldingShares'].iloc[-1] / 1000)
-    with engine.begin() as conn:
-        conn.execute(text("UPDATE daily_scans SET fund_count = :f WHERE ticker = :t AND scan_date = :d"), {"f": fund, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
-    return True if fund is not None else False
-
-def update_roe_v3(ticker):
-    """財報歸位：730天兩年搜尋，精準鎖定 ReturnOnEquityAftTax"""
-    df = fetch_fm("TaiwanStockFinancialStatements", ticker, 730)
-    roe = None
-    if df is not None and not df.empty:
-        r_row = df[df['type'] == 'ReturnOnEquityAftTax']
-        if not r_row.empty:
-            val = float(r_row['value'].iloc[-1])
-            roe = val / 100 if val > 1 or val < -1 else val
-    with engine.begin() as conn:
-        conn.execute(text("UPDATE daily_scans SET roe = :r WHERE ticker = :t AND scan_date = :d"), {"r": roe, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
-    return True if roe is not None else False
-
-# ================= 3. UI 介面設計 (V164.0) =================
-st.set_page_config(page_title="🛡️ 哲哲量子戰情室 Sponsor V164.0", layout="wide")
+# ================= 4. UI 介面設計 (V165.0) =================
+st.set_page_config(page_title="🛡️ 哲哲量子戰情室 Sponsor V165.0", layout="wide")
 
 st.markdown("""<style>
-    [data-testid="stBaseButton-secondary"] { width: 100% !important; height: 3.5em !important; font-size: 1.1rem !important; font-weight: 800 !important; border-radius: 12px !important; margin-bottom: 8px !important; background: linear-gradient(135deg, #FF3333 0%, #AA0000 100%) !important; color: white !important; }
+    [data-testid="stBaseButton-secondary"] { width: 100% !important; height: 3.5em !important; font-size: 1.1rem !important; font-weight: 800 !important; border-radius: 10px !important; margin-bottom: 8px !important; background: linear-gradient(135deg, #FF3333 0%, #AA0000 100%) !important; color: white !important; }
     .big-font { font-size:60px !important; font-weight: 900; color: #FF3333; text-shadow: 2px 2px 4px #ddd; }
 </style>""", unsafe_allow_html=True)
 
-st.title("🛡️ 哲哲量子戰情室 Sponsor V164.0 — 終極封神版")
+st.title("🛡️ 哲哲量子戰情室 Sponsor V165.0 — 量子除錯歸位版")
 
 tab1, tab2, tab3 = st.tabs(["🚀 指揮中心", "💼 庫存股票戰略中心", "🛠️ 管理中心"])
 
 if 'status_msg' not in st.session_state: st.session_state['status_msg'] = ""
 
 with tab1:
-    st.markdown("### 🏹 暴力數據抓取與週期精算 (Sponsor 6000)")
+    st.markdown("### 🏹 數據抓取與週期精算")
     c1, c2, c3, c4, c5 = st.columns(5)
     pool = pd.read_sql("SELECT ticker, stock_name FROM stock_pool", con=engine)
     today = datetime.datetime.now(TW_TZ).date()
@@ -119,14 +144,14 @@ with tab1:
                 for i, fut in enumerate(as_completed(futures)):
                     if fut.result(): s += 1
                     else: f += 1
-                    pb.progress((i+1)/len(pool)); st_txt.text(f"🚀 進度: {i+1}/{len(pool)} | 成功: {s} 失敗: {f}")
-            st.session_state['status_msg'] = f"✅ 行情重掃完成！成功: {s}, 失敗: {f}"
+                    pb.progress((i+1)/len(pool)); st_txt.text(f"🚀 行情: {i+1}/{len(pool)} | 成功: {s} 失敗: {f}")
+            st.session_state['status_msg'] = f"✅ 行情完成！成功: {s}, 失敗: {f}"
             st.rerun()
     with c2:
         if st.button("🔄 補救掃描：補抓+計算", key="b2"):
             done = pd.read_sql(text("SELECT ticker FROM daily_scans WHERE scan_date = :t AND price > 0"), con=engine, params={"t": today})
             missing = pool[~pool['ticker'].isin(done['ticker'].tolist())]
-            if missing.empty: st.session_state['status_msg'] = "🎯 今日數據已全壘打！"
+            if missing.empty: st.session_state['status_msg'] = "🎯 數據已全壘打！"
             else:
                 pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
                 with ThreadPoolExecutor(max_workers=10) as exe:
@@ -138,26 +163,24 @@ with tab1:
                 st.session_state['status_msg'] = f"✅ 補救完成！成功: {s}, 失敗: {f}"
                 st.rerun()
     with c3:
-        if st.button("💼 籌碼補完：投信張數(60天)", key="b3"):
-            pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
+        if st.button("💼 籌碼補完：投信張數", key="b3"):
+            pb = st.progress(0); st_txt = st.empty(); s = 0
             with ThreadPoolExecutor(max_workers=10) as exe:
-                futures = {exe.submit(update_chip_v3, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
+                futures = {exe.submit(update_chip_v4, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
                 for i, fut in enumerate(as_completed(futures)):
                     if fut.result(): s += 1
-                    else: f += 1
-                    pb.progress((i+1)/len(pool)); st_txt.text(f"💼 籌碼進度: {i+1}/{len(pool)} | 成功: {s} 失敗: {f}")
-            st.session_state['status_msg'] = f"✅ 籌碼更新成功！共 {s} 筆"
+                    pb.progress((i+1)/len(pool)); st_txt.text(f"💼 籌碼: {i+1}/{len(pool)}")
+            st.session_state['status_msg'] = f"✅ 投信數據補完！共 {s} 筆"
             st.rerun()
     with c4:
-        if st.button("💎 財報精算：ROE同步(730天)", key="b4"):
-            pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
+        if st.button("💎 財報精算：ROE 同步", key="b4"):
+            pb = st.progress(0); st_txt = st.empty(); s = 0
             with ThreadPoolExecutor(max_workers=10) as exe:
-                futures = {exe.submit(update_roe_v3, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
+                futures = {exe.submit(update_roe_v4, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
                 for i, fut in enumerate(as_completed(futures)):
                     if fut.result(): s += 1
-                    else: f += 1
-                    pb.progress((i+1)/len(pool)); st_txt.text(f"💎 財報進度: {i+1}/{len(pool)} | 成功: {s} 失敗: {f}")
-            st.session_state['status_msg'] = f"✅ 財報更新成功！共 {s} 筆"
+                    pb.progress((i+1)/len(pool)); st_txt.text(f"💎 財報: {i+1}/{len(pool)}")
+            st.session_state['status_msg'] = f"✅ ROE 數據同步！共 {s} 筆"
             st.rerun()
     with c5:
         if st.button("🔥 清空今日快取", key="b5"):
@@ -166,6 +189,19 @@ with tab1:
             st.rerun()
 
     if st.session_state['status_msg']: st.info(st.session_state['status_msg'])
+
+    st.divider()
+    st.subheader("🧪 哲哲數據實驗室 (Debug Mode)")
+    test_cid = st.text_input("輸入要診斷的股號 (如: 2330)", value="2330")
+    if st.button("🔍 執行量子診斷：查看原始 API 回傳", key="debug_btn"):
+        r_roe, r_chip = debug_raw_api(test_cid)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("📖 財報原始 JSON:")
+            st.json(r_roe)
+        with col2:
+            st.write("💼 籌碼原始 JSON:")
+            st.json(r_chip)
 
     st.divider()
     cr, cm, cd = st.columns([1,1,1])
@@ -180,7 +216,7 @@ with tab1:
             all_data = pd.read_sql(text("SELECT * FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": today})
             st.dataframe(all_data.style.map(lambda x: 'background-color: #FFCCCC; color: red;' if x == 0 or pd.isna(x) or str(x) == "None" else ''), width=1500)
     with cd:
-        st.markdown("##### 🧪 診斷：下載目前數據")
+        st.markdown("##### 📥 下載目前數據")
         diag_df = pd.read_sql(text("SELECT ticker, stock_name, roe, fund_count, price FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": today})
         st.download_button("📥 下載 ROE/籌碼清單", data=diag_df.to_csv(index=False).encode('utf-8-sig'), file_name=f"diag_{today}.csv")
 
@@ -192,7 +228,6 @@ with tab1:
             if st.button(name, key=f"s_{name}"):
                 res = df[eval(cond)]
                 st.dataframe(res.style.background_gradient(cmap='YlOrRd', subset=['現價']), width=1500)
-                # send_line_placeholder(name, res) # 實際串接時開啟
 
 with tab2:
     st.header("💼 庫存股票戰略中心 (非 Yahoo)")
@@ -246,6 +281,6 @@ with tab3:
                 conn.execute(text("DELETE FROM portfolio"))
                 df_new.to_sql('portfolio', con=engine, if_exists='append', index=False)
             st.success("✅ 覆蓋成功")
-        st.download_button("📥 範例：下載庫存 CSV", data="ticker,stock_name,entry_price,qty\n2330,台積電,600,1000\n2317,鴻海,100,500", file_name="sample_portfolio.csv")
+        st.download_button("📥 範例：下載庫存 CSV", data="ticker,stock_name,entry_price,qty\n2330,台積電,600,1000", file_name="sample_portfolio.csv")
 
-st.caption("本系統由哲哲團隊開發。V164.0 Sponsor 全能旗艦版，贏到流湯不要忘了我！")
+st.caption("本系統由哲哲團隊開發。V165.0 Sponsor 全能旗艦版，贏到流湯不要忘了我！")
