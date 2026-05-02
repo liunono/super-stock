@@ -6,12 +6,12 @@ import pytz
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas_ta as ta
-import io
 
-# ================= 1. 系統地基 (API 加壓與防報錯) =================
+# ================= 1. 系統地基 (修正語法錯誤 & 權限設定) =================
 try:
     TW_TZ = pytz.timezone('Asia/Taipei')
-    DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
+    # 💎 修正後的 DB_URL：補上 } 符號
+    DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
     engine = create_engine(DB_URL, connect_args={"charset": "utf8mb4", "connect_timeout": 30}, pool_pre_ping=True)
     
     FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoibG92ZTUyMTUiLCJlbWFpbCI6ImNocmlzNTIxNUBnbWFpbC5jb20ifQ.yeh3T_iNCA4IWmlsPZHHyVUbMOH_qe35stdLgIv9ONY"
@@ -23,7 +23,7 @@ try:
                 ticker VARCHAR(20), stock_name VARCHAR(50), price FLOAT, change_pct FLOAT, 
                 sma5 FLOAT, ma20 FLOAT, ma60 FLOAT, rsi FLOAT, bbl FLOAT, bbu FLOAT, 
                 vol BIGINT, avg_vol BIGINT, scan_date DATE, kd20 FLOAT, kd60 FLOAT,
-                roe FLOAT DEFAULT NULL, rev_growth FLOAT DEFAULT NULL, fund_count INT DEFAULT NULL,
+                roe FLOAT DEFAULT NULL, fund_count INT DEFAULT NULL,
                 high_20 FLOAT, vol_20 FLOAT, bb_width FLOAT,
                 PRIMARY KEY (ticker, scan_date)
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -32,47 +32,56 @@ try:
 except Exception as e:
     st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# ================= 2. 核心大腦 (數據挖掘：ROE 暴力精算 + 籌碼量子修正) =================
+# ================= 2. 核心大腦 (量子暴力挖掘與精算邏輯) =================
 
 def fetch_fm(dataset, ticker, start_days=160):
     cid = str(ticker).split('.')[0].strip()
     start = (datetime.datetime.now(TW_TZ) - datetime.timedelta(days=start_days)).strftime('%Y-%m-%d')
     try:
-        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": dataset, "data_id": cid, "start_date": start, "token": FINMIND_TOKEN}, timeout=15).json()
+        r = requests.get("https://api.finmindtrade.com/api/v4/data", 
+                         params={"dataset": dataset, "data_id": cid, "start_date": start, "token": FINMIND_TOKEN}, timeout=15).json()
         return pd.DataFrame(r['data']) if r['msg'] == 'success' and r['data'] else None
     except: return None
 
 def update_chip_v_quantum(ticker):
-    """💎 籌碼量子修正：挖掘 60 天內大人的真錢蹤跡"""
+    """💎 籌碼量子修正：搜尋 60 天資料，挖掘大人最後一次的真錢蹤跡"""
     df = fetch_fm("TaiwanStockHoldingSharesPer", ticker, 60)
     fund = None
     if df is not None and not df.empty:
-        # 排除 0 與 None，抓最後一個有效值
-        valid = df[df['InvestmentTrustHoldingShares'] > 0]
-        if not valid.empty:
-            fund = int(valid.iloc[-1]['InvestmentTrustHoldingShares'] / 1000)
+        # 排除 0 與空值，過濾出投信有買的資料
+        valid_df = df[df['InvestmentTrustHoldingShares'] > 0]
+        if not valid_df.empty:
+            # 抓取最後一筆「真錢」張數 (轉換為張)
+            fund = int(valid_df.iloc[-1]['InvestmentTrustHoldingShares'] / 1000)
         else:
-            fund = 0
+            fund = 0 # 搜尋 60 天都沒買，就是真的 0
     with engine.begin() as conn:
         conn.execute(text("UPDATE daily_scans SET fund_count = :f WHERE ticker = :t AND scan_date = :d"), 
                      {"f": fund, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
     return True if fund is not None else False
 
-def update_roe_v_logic(ticker):
-    """💎 財報暴力精算：本地執行 淨利/權益 運算，解決標籤缺失"""
+def update_roe_v_brute(ticker):
+    """💎 財報暴力精算：抓取淨利與權益，本地立刻完成 ROE 計算"""
+    # 抓取 730 天確保能抓到完整季報
     df = fetch_fm("TaiwanStockFinancialStatements", ticker, 730)
     roe_calc = None
     if df is not None and not df.empty:
-        # 同時篩選 淨利 與 權益
+        # 同時篩選分子 (IncomeAfterTaxes) 與 分母 (Equity/TotalEquity)
         income_df = df[df['type'] == 'IncomeAfterTaxes']
         equity_df = df[df['type'].isin(['Equity', 'TotalEquity'])]
+        
         if not income_df.empty and not equity_df.empty:
+            # 找到最新的淨利公告日
             latest_date = income_df['date'].iloc[-1]
             net_income = float(income_df[income_df['date'] == latest_date]['value'].iloc[-1])
-            # 權益取最接近該日期的數值
-            total_equity = float(equity_df[equity_df['date'] <= latest_date]['value'].iloc[-1])
-            if total_equity != 0:
-                roe_calc = net_income / total_equity
+            # 找到最接近該公告日的權益總額
+            target_equity_rows = equity_df[equity_df['date'] <= latest_date]
+            if not target_equity_rows.empty:
+                total_equity = float(target_equity_rows.iloc[-1]['value'])
+                if total_equity != 0:
+                    # 💡 抓完數據直接算！數字會說話！
+                    roe_calc = net_income / total_equity
+    
     with engine.begin() as conn:
         conn.execute(text("UPDATE daily_scans SET roe = :r WHERE ticker = :t AND scan_date = :d"), 
                      {"r": roe_calc, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
@@ -100,20 +109,20 @@ def calc_and_save_full(ticker, name):
             ON DUPLICATE KEY UPDATE price=VALUES(price), change_pct=VALUES(change_pct), sma5=VALUES(sma5), ma20=VALUES(ma20), rsi=VALUES(rsi), vol=VALUES(vol), avg_vol=VALUES(avg_vol), bb_width=VALUES(bb_width)"""), data)
     return True
 
-# ================= 3. UI 介面設計 (V169.0) =================
-st.set_page_config(page_title="🛡️ 哲哲量子戰情室 V169.0", layout="wide")
+# ================= 3. UI 介面設計 (V170.0) =================
+st.set_page_config(page_title="🛡️ 哲哲量子戰情室 V170.0", layout="wide")
 
 st.markdown("""<style>
     [data-testid="stBaseButton-secondary"] { width: 100% !important; height: 3.5em !important; font-size: 1.1rem !important; font-weight: 800 !important; border-radius: 12px !important; margin-bottom: 8px !important; background: linear-gradient(135deg, #FF3333 0%, #AA0000 100%) !important; color: white !important; }
     .big-font { font-size:60px !important; font-weight: 900; color: #FF3333; text-shadow: 2px 2px 4px #ddd; }
 </style>""", unsafe_allow_html=True)
 
-st.title("🛡️ 哲哲量子戰情室 Sponsor V169.0 — 量子終極版")
+st.title("🛡️ 哲哲量子戰情室 Sponsor V170.0 — 量子暴力版")
 
 tab1, tab2, tab3 = st.tabs(["🚀 指揮中心", "💼 庫存股票戰略中心", "🛠️ 管理中心"])
 
-# 狀態持久化：確保統計資訊不消失
-if 'scan_log' not in st.session_state: st.session_state['scan_log'] = {}
+# 💡 持久化計數資訊：使用 session_state 鎖死訊息
+if 'scan_results' not in st.session_state: st.session_state['scan_results'] = {}
 
 with tab1:
     st.markdown("### 🏹 數據抓取與週期精算 (Sponsor 6000)")
@@ -130,13 +139,13 @@ with tab1:
                     if fut.result(): s += 1
                     else: f += 1
                     pb.progress((i+1)/len(pool)); st_txt.text(f"🚀 進度: {i+1}/{len(pool)} | 成功: {s} 失敗: {f}")
-            st.session_state['scan_log']['daily'] = f"✅ 行情重掃完成！成功: {s}, 失敗: {f}"
+            st.session_state['scan_results']['daily'] = f"✅ 行情重掃完成！成功: {s}, 失敗: {f}"
             st.rerun()
     with c2:
-        if st.button("🔄 補救掃描：補抓+計算指標", key="b_fix"):
+        if st.button("🔄 補救掃描：補抓計算", key="b_fix"):
             done = pd.read_sql(text("SELECT ticker FROM daily_scans WHERE scan_date = :t AND price > 0"), con=engine, params={"t": today})
             missing = pool[~pool['ticker'].isin(done['ticker'].tolist())]
-            if missing.empty: st.session_state['scan_log']['fix'] = "🎯 數據已全壘打！"
+            if missing.empty: st.session_state['scan_results']['fix'] = "🎯 數據已全壘打！"
             else:
                 pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
                 with ThreadPoolExecutor(max_workers=10) as exe:
@@ -145,38 +154,38 @@ with tab1:
                         if fut.result(): s += 1
                         else: f += 1
                         pb.progress((i+1)/len(missing)); st_txt.text(f"🔄 補救中: {i+1}/{len(missing)} | 成功: {s} 失敗: {f}")
-                st.session_state['scan_log']['fix'] = f"✅ 補救完成！成功: {s}, 失敗: {f}"
+                st.session_state['scan_results']['fix'] = f"✅ 補救完成！成功: {s}, 失敗: {f}"
                 st.rerun()
     with c3:
-        if st.button("💼 籌碼補完：量子修正挖掘", key="b_chip"):
+        if st.button("💼 籌碼補完：量子修正", key="b_chip"):
             pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
             with ThreadPoolExecutor(max_workers=10) as exe:
                 futures = {exe.submit(update_chip_v_quantum, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
                 for i, fut in enumerate(as_completed(futures)):
                     if fut.result(): s += 1
                     else: f += 1
-                    pb.progress((i+1)/len(pool)); st_txt.text(f"💼 挖掘籌碼中: {i+1}/{len(pool)}")
-            st.session_state['scan_log']['chip'] = f"✅ 籌碼量子修正完成！成功: {s}, 失敗: {f}"
+                    pb.progress((i+1)/len(pool)); st_txt.text(f"💼 籌碼挖掘中: {i+1}/{len(pool)}")
+            st.session_state['scan_results']['chip'] = f"✅ 籌碼量子修正完成！成功: {s}, 失敗: {f}"
             st.rerun()
     with c4:
-        if st.button("💎 財報精算：ROE暴力精算", key="b_roe"):
+        if st.button("💎 財報精算：ROE暴力算", key="b_roe"):
             pb = st.progress(0); st_txt = st.empty(); s, f = 0, 0
             with ThreadPoolExecutor(max_workers=10) as exe:
-                futures = {exe.submit(update_roe_v_logic, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
+                futures = {exe.submit(update_roe_v_brute, r['ticker']): r['ticker'] for _, r in pool.iterrows()}
                 for i, fut in enumerate(as_completed(futures)):
                     if fut.result(): s += 1
                     else: f += 1
                     pb.progress((i+1)/len(pool)); st_txt.text(f"💎 精算ROE中: {i+1}/{len(pool)}")
-            st.session_state['scan_log']['roe'] = f"✅ ROE暴力精算完成！成功: {s}, 失敗: {f}"
+            st.session_state['scan_results']['roe'] = f"✅ ROE暴力精算完成！成功: {s}, 失敗: {f}"
             st.rerun()
     with c5:
         if st.button("🔥 清空今日快取", key="b_clear"):
             with engine.begin() as conn: conn.execute(text("DELETE FROM daily_scans WHERE scan_date = :t"), {"t": today})
-            st.session_state['scan_log'] = {"clear": "🗑️ 今日快取已清空"}
+            st.session_state['scan_results'] = {"clear": "🗑️ 今日快取已清空"}
             st.rerun()
 
-    # 顯示持久化計數資訊
-    for msg in st.session_state['scan_log'].values(): st.info(msg)
+    # 顯示持久化的掃描結果
+    for m in st.session_state['scan_results'].values(): st.info(m)
 
     st.divider()
     cr, cm, cd = st.columns([1,1,1])
@@ -203,7 +212,7 @@ with tab1:
                 res = df[eval(cond)]; st.dataframe(res.style.background_gradient(cmap='YlOrRd', subset=['現價']), width=1500)
 
 with tab2:
-    st.header("💼 庫存股票戰略中心 (實時監控)")
+    st.header("💼 庫存股票戰略中心 (實時損益精算)")
     df_p = pd.read_sql("SELECT ticker, stock_name, entry_price, qty FROM portfolio", con=engine)
     if not df_p.empty:
         if st.button("🔄 同步庫存行情+損益精算", key="btn_p_up"):
@@ -227,28 +236,28 @@ with tab2:
         sell_btns = [("💀 均線死叉", "df_display['sma5'] < df_display['ma20']"), ("🔥 RSI 過熱", "df_display['rsi'] > 80"), ("💰 利潤止盈", "df_display['報酬率(%)'] > 15"), ("📉 破位停損", "df_display['報酬率(%)'] < -10")]
         for j, (s_name, s_cond) in enumerate(sell_btns):
             if m_c[j].button(s_name, key=f"sel_{s_name}"):
-                st.success(f"✅ {s_name} 指令已發出！")
+                st.success(f"✅ {s_name} 賣訊指令已發出！")
 
 with tab3:
     st.subheader("🛠️ 管理中心")
     c_p, c_c = st.columns(2)
     with c_p:
-        f1 = st.file_uploader("股票池 CSV (去重)", type="csv", key="u1")
-        if f1 and st.button("💾 儲存並去重"):
+        f1 = st.file_uploader("股票池 CSV (自動去重)", type="csv", key="u1")
+        if f1 and st.button("💾 儲存並去重", key="sv1"):
             df_new = pd.read_csv(f1).drop_duplicates(subset=['ticker'])
             df_new.columns = df_new.columns.str.lower().str.strip()
             with engine.begin() as conn:
                 conn.execute(text("DELETE FROM stock_pool")); df_new.to_sql('stock_pool', con=engine, if_exists='append', index=False)
             st.success("✅ 股票池更新成功")
-        st.download_button("📥 下載股票池範例", data="ticker,stock_name\n2330,台積電\n2317,鴻海", file_name="sample_pool.csv")
+        st.download_button("📥 範例：下載股票池 CSV", data="ticker,stock_name\n2330,台積電\n2317,鴻海", file_name="sample_pool.csv")
     with c_c:
-        f2 = st.file_uploader("庫存 CSV (覆蓋)", type="csv", key="u2")
-        if f2 and st.button("💾 清除並覆蓋"):
+        f2 = st.file_uploader("庫存 CSV (清除+覆蓋)", type="csv", key="u2")
+        if f2 and st.button("💾 清除並覆蓋", key="sv2"):
             df_new = pd.read_csv(f2).drop_duplicates(subset=['ticker'])
             df_new.columns = df_new.columns.str.lower().str.strip()
             with engine.begin() as conn:
                 conn.execute(text("DELETE FROM portfolio")); df_new.to_sql('portfolio', con=engine, if_exists='append', index=False)
             st.success("✅ 庫存覆蓋成功")
-        st.download_button("📥 下載庫存範例", data="ticker,stock_name,entry_price,qty\n2330,台積電,600,1000", file_name="sample_portfolio.csv")
+        st.download_button("📥 範例：下載庫存 CSV", data="ticker,stock_name,entry_price,qty\n2330,台積電,600,1000", file_name="sample_portfolio.csv")
 
-st.caption("本系統由哲哲團隊開發。V169.0 Sponsor 全能旗艦版，贏到流湯不是夢！")
+st.caption("本系統由哲哲團隊開發。V170.0 Sponsor 全能旗艦版，贏到流湯不是夢！")
