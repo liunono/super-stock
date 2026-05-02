@@ -9,7 +9,7 @@ import pandas_ta as ta
 import io
 
 # ================= 0. 頁面設定 (必須在最前面) =================
-st.set_page_config(page_title="🛡️ 哲哲量子戰情室 V175.0", layout="wide")
+st.set_page_config(page_title="🛡️ 哲哲量子戰情室 V175.1", layout="wide")
 
 st.markdown("""<style>
     [data-testid="stBaseButton-secondary"] { width: 100% !important; height: 3.5em !important; font-size: 1.1rem !important; font-weight: 800 !important; border-radius: 12px !important; background: linear-gradient(135deg, #FF3333 0%, #AA0000 100%) !important; color: white !important; }
@@ -86,11 +86,13 @@ def fetch_fm(dataset, ticker, start_days=160):
         return None
 
 def update_chip_v_quantum(ticker):
-    """💎 籌碼量子修正：強效容錯版 (抓取60天內投信淨買超總和)"""
+    """💎 籌碼量子修正：改用 FinMind 官方英文代碼 'Investment_Trust'"""
     df = fetch_fm("TaiwanStockInstitutionalInvestorsBuySell", ticker, 60)
     fund = 0
     if df is not None and not df.empty and 'name' in df.columns:
-        valid = df[df['name'] == '投信'].copy()
+        # 🚨 精準打擊：FinMind 的投信叫做 'Investment_Trust'
+        valid = df[df['name'] == 'Investment_Trust'].copy()
+        
         if not valid.empty:
             valid['buy'] = pd.to_numeric(valid['buy'], errors='coerce').fillna(0)
             valid['sell'] = pd.to_numeric(valid['sell'], errors='coerce').fillna(0)
@@ -103,26 +105,27 @@ def update_chip_v_quantum(ticker):
     return True
 
 def update_roe_v_brute(ticker):
-    """💎 財報暴力精算：無腦抓取最新季度的淨利與權益"""
+    """💎 財報暴力精算：極簡化，鎖定官方唯一標記 'IncomeAfterTaxes' 與 'Equity'"""
     df_income = fetch_fm("TaiwanStockFinancialStatements", ticker, 730)
     df_balance = fetch_fm("TaiwanStockBalanceSheet", ticker, 730)
     
     roe_calc = None
     if df_income is not None and not df_income.empty and df_balance is not None and not df_balance.empty:
-        income_keys = ['IncomeAfterTaxes', 'NetIncome', '本期淨利（淨損）', '本期淨利']
-        equity_keys = ['Equity', 'TotalEquity', '權益總計', '股東權益總計', '權益總額']
         
-        income_df = df_income[df_income['type'].isin(income_keys)].sort_values('date')
-        equity_df = df_balance[df_balance['type'].isin(equity_keys)].sort_values('date')
+        # 🚨 精準打擊：拋棄中文模糊搜尋，直接抓 FinMind 的標準英文代碼
+        income_df = df_income[df_income['type'] == 'IncomeAfterTaxes'].sort_values('date')
+        equity_df = df_balance[df_balance['type'].isin(['Equity', 'TotalEquity'])].sort_values('date')
         
         if not income_df.empty and not equity_df.empty:
             try:
-                # 不管日期對不對齊，直接抓排序後的最後一筆(最新一季)
+                # 直接抓排序後的最後一筆 (最新一季公佈的數值)
                 net_income = float(income_df.iloc[-1]['value'])
                 total_equity = float(equity_df.iloc[-1]['value'])
+                
                 if total_equity != 0:
                     roe_calc = net_income / total_equity
-            except: pass
+            except: 
+                pass
                     
     with engine.begin() as conn:
         conn.execute(text("UPDATE daily_scans SET roe = :r WHERE ticker = :t AND scan_date = :d"), 
@@ -152,8 +155,8 @@ def calc_and_save_full(ticker, name):
             ON DUPLICATE KEY UPDATE price=VALUES(price), change_pct=VALUES(change_pct), sma5=VALUES(sma5), ma20=VALUES(ma20), rsi=VALUES(rsi), vol=VALUES(vol), avg_vol=VALUES(avg_vol), bb_width=VALUES(bb_width)"""), data)
     return True
 
-# ================= 3. UI 介面設計 (V175.0) =================
-st.title("🛡️ 哲哲量子戰情室 Sponsor V175.0 — 全自動旗艦版")
+# ================= 3. UI 介面設計 (V175.1) =================
+st.title("🛡️ 哲哲量子戰情室 Sponsor V175.1 — 全自動旗艦解碼版")
 tab1, tab2, tab3 = st.tabs(["🚀 選股指揮中心", "💼 庫存戰略中心", "🛠️ 系統管理中心"])
 
 today = datetime.datetime.now(TW_TZ).date()
