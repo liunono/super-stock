@@ -46,41 +46,43 @@ def fetch_fm(dataset, ticker, start_days=160):
     except: return None
 
 def update_chip_v_quantum(ticker):
-    """💎 籌碼量子修正：搜尋 60 天資料，挖掘大人蹤跡"""
-    df = fetch_fm("TaiwanStockHoldingSharesPer", ticker, 60)
+    """💎 籌碼量子修正：從三大法人買賣表，挖出 60 天內投信大軍的累積買超張數"""
+    df = fetch_fm("TaiwanStockInstitutionalInvestorsBuySell", ticker, 60)
     fund = 0
     if df is not None and not df.empty:
-        valid = df[df['InvestmentTrustHoldingShares'] > 0]
+        valid = df[df['name'] == '投信'].copy()
         if not valid.empty:
-            fund = int(valid.iloc[-1]['InvestmentTrustHoldingShares'] / 1000)
+            valid['net_buy'] = (valid['buy'] - valid['sell']) / 1000
+            fund = int(valid['net_buy'].sum())
+            
     with engine.begin() as conn:
         conn.execute(text("UPDATE daily_scans SET fund_count = :f WHERE ticker = :t AND scan_date = :d"), 
                      {"f": fund, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
     return True
 
 def update_roe_v_brute(ticker):
-    """💎 財報暴力精算：排除「淨利」混淆項，鎖定真正「權益」"""
-    df = fetch_fm("TaiwanStockFinancialStatements", ticker, 730)
+    """💎 財報暴力精算：淨利(損益表) / 權益(資產負債表) 雙表聯查"""
+    df_income = fetch_fm("TaiwanStockFinancialStatements", ticker, 730)
+    df_balance = fetch_fm("TaiwanStockBalanceSheet", ticker, 730)
+    
     roe_calc = None
-    if df is not None and not df.empty:
-        # 分子：本期淨利
+    if df_income is not None and not df_income.empty and df_balance is not None and not df_balance.empty:
         income_keys = ['IncomeAfterTaxes', 'NetIncome', '本期淨利（淨損）']
-        # 分母：排除損益表裡的「歸屬於母公司淨利」，鎖定「權益總額」
         equity_keys = ['Equity', 'TotalEquity', '權益總計', '股東權益總計']
         
-        income_df = df[df['type'].isin(income_keys)].sort_values('date')
-        equity_df = df[df['type'].isin(equity_keys)].sort_values('date')
+        income_df = df_income[df_income['type'].isin(income_keys)].sort_values('date')
+        equity_df = df_balance[df_balance['type'].isin(equity_keys)].sort_values('date')
         
         if not income_df.empty and not equity_df.empty:
             latest_date = income_df['date'].max()
             net_income = float(income_df[income_df['date'] == latest_date]['value'].iloc[-1])
-            # 💡 確保分母跟分子日期對齊
+            
             target_equity = equity_df[equity_df['date'] == latest_date]
             if not target_equity.empty:
                 total_equity = float(target_equity.iloc[-1]['value'])
                 if total_equity != 0:
                     roe_calc = net_income / total_equity
-    
+                    
     with engine.begin() as conn:
         conn.execute(text("UPDATE daily_scans SET roe = :r WHERE ticker = :t AND scan_date = :d"), 
                      {"r": roe_calc, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
