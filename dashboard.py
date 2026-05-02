@@ -15,7 +15,7 @@ try:
     DB_URL = f"mysql+pymysql://{st.secrets['DB_USER']}:{st.secrets['DB_PASS']}@{st.secrets['DB_HOST']}:3306/{st.secrets['DB_NAME']}?charset=utf8mb4"
     engine = create_engine(DB_URL, connect_args={"charset": "utf8mb4", "connect_timeout": 30}, pool_pre_ping=True)
     
-    FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2Vy_idIjoibG92ZTUyMTUiLCJlbWFpbCI6ImNocmlzNTIxNUBnbWFpbC5jb20ifQ.yeh3T_iNCA4IWmlsPZHHyVUbMOH_qe35stdLgIv9ONY"
+    FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoibG92ZTUyMTUiLCJlbWFpbCI6ImNocmlzNTIxNUBnbWFpbC5jb20ifQ.yeh3T_iNCA4IWmlsPZHHyVUbMOH_qe35stdLgIv9ONY"
     
     with engine.connect() as conn:
         conn.execute(text("SET NAMES utf8mb4;"))
@@ -33,11 +33,11 @@ try:
 except Exception as e:
     st.error(f"❌ 系統地基損毀：{e}"); st.stop()
 
-# 初始化持久化計數器
+# 💡 持久化計數資訊：使用 session_state 確保訊息不消失
 if 'scan_status' not in st.session_state:
     st.session_state['scan_status'] = {"daily": "", "fix": "", "chip": "", "roe": ""}
 
-# ================= 2. 核心大腦 (量子暴力挖掘與精算邏輯) =================
+# ================= 2. 核心大腦 (量子暴力挖掘與精算) =================
 
 def fetch_fm(dataset, ticker, start_days=160):
     cid = str(ticker).split('.')[0].strip()
@@ -49,16 +49,17 @@ def fetch_fm(dataset, ticker, start_days=160):
     except: return None
 
 def update_chip_v_quantum(ticker):
-    """💎 籌碼量子修正：搜尋 60 天資料，排除 0，挖出大人蹤跡"""
+    """💎 籌碼量子修正：搜尋 60 天資料，排除 0，挖出大人最後一次真錢蹤跡"""
     df = fetch_fm("TaiwanStockHoldingSharesPer", ticker, 60)
     fund = None
     if df is not None and not df.empty:
-        # 關鍵：過濾 InvestmentTrustHoldingShares > 0
+        # 過濾投信持股大於 0 的紀錄
         valid = df[df['InvestmentTrustHoldingShares'] > 0]
         if not valid.empty:
+            # 抓取最後一筆非零數據 (轉換為張)
             fund = int(valid.iloc[-1]['InvestmentTrustHoldingShares'] / 1000)
         else:
-            fund = 0 # 真的沒買
+            fund = 0
     with engine.begin() as conn:
         conn.execute(text("UPDATE daily_scans SET fund_count = :f WHERE ticker = :t AND scan_date = :d"), 
                      {"f": fund, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
@@ -78,7 +79,8 @@ def update_roe_v_brute(ticker):
             if not target_equity.empty:
                 total_equity = float(target_equity.iloc[-1]['value'])
                 if total_equity != 0:
-                    roe_calc = net_income / total_equity # 數字會說話！直接算！
+                    # 抓完立刻算完！數字會說話！
+                    roe_calc = net_income / total_equity
     with engine.begin() as conn:
         conn.execute(text("UPDATE daily_scans SET roe = :r WHERE ticker = :t AND scan_date = :d"), 
                      {"r": roe_calc, "t": ticker, "d": datetime.datetime.now(TW_TZ).date()})
@@ -106,15 +108,15 @@ def calc_and_save_full(ticker, name):
             ON DUPLICATE KEY UPDATE price=VALUES(price), change_pct=VALUES(change_pct), sma5=VALUES(sma5), ma20=VALUES(ma20), rsi=VALUES(rsi), vol=VALUES(vol), avg_vol=VALUES(avg_vol), bb_width=VALUES(bb_width)"""), data)
     return True
 
-# ================= 3. UI 介面設計 (V171.0) =================
-st.set_page_config(page_title="🛡️ 哲哲量子戰情室 V171.0", layout="wide")
+# ================= 3. UI 介面設計 (V172.0) =================
+st.set_page_config(page_title="🛡️ 哲哲量子戰情室 V172.0", layout="wide")
 
 st.markdown("""<style>
     [data-testid="stBaseButton-secondary"] { width: 100% !important; height: 3.5em !important; font-size: 1.1rem !important; font-weight: 800 !important; border-radius: 12px !important; margin-bottom: 8px !important; background: linear-gradient(135deg, #FF3333 0%, #AA0000 100%) !important; color: white !important; }
     .big-font { font-size:60px !important; font-weight: 900; color: #FF3333; text-shadow: 2px 2px 4px #ddd; }
 </style>""", unsafe_allow_html=True)
 
-st.title("🛡️ 哲哲量子戰情室 Sponsor V171.0 — 數據診斷封神版")
+st.title("🛡️ 哲哲量子戰情室 Sponsor V172.0 — 量子歸位封神版")
 
 tab1, tab2, tab3 = st.tabs(["🚀 指揮中心", "💼 庫存股票戰略中心", "🛠️ 管理中心"])
 
@@ -159,7 +161,7 @@ with tab1:
                     if fut.result(): s += 1
                     else: f += 1
                     pb.progress((i+1)/len(pool))
-            st.session_state['scan_status']['chip'] = f"✅ 籌碼量子修正完成！成功: {s}, 失敗: {f}"
+            st.session_state['scan_status']['chip'] = f"✅ 籌碼量子修正成功！成功: {s}, 失敗: {f}"
             st.rerun()
     with c4:
         if st.button("💎 財報精算：ROE暴力算", key="b_roe"):
@@ -178,26 +180,32 @@ with tab1:
             st.session_state['scan_status'] = {"clear": "🗑️ 今日快取已清空"}
             st.rerun()
 
-    # 顯示持久化計數資訊 (不消失)
+    # 顯示持久化計數資訊
     for m in st.session_state['scan_status'].values(): 
         if m: st.info(m)
 
     st.divider()
     
-    # 💎 診斷按鈕：抓取原始數據來看看到底抓了什麼鬼
-    st.subheader("🧪 數據診斷實驗室 (看看主力在搞什麼鬼)")
+    # 💎 數據診斷按鈕 (直接抓原始數據)
+    st.subheader("🧪 數據診斷實驗室 (掀開主力的底牌)")
     diag_c1, diag_c2 = st.columns(2)
     with diag_c1:
-        if st.button("📥 下載財報原始碼 (ROE 診斷)", key="diag_roe"):
-            # 隨機抓一檔台積電示範，或抓全部
+        if st.button("🔍 抓取財報原始碼：2330 台積電", key="fetch_roe"):
             raw_roe = fetch_fm("TaiwanStockFinancialStatements", "2330", 730)
             if raw_roe is not None:
-                st.download_button("💾 下載台積電原始財報 (CSV)", data=raw_roe.to_csv(index=False).encode('utf-8-sig'), file_name="raw_roe_2330.csv")
+                st.session_state['raw_roe_df'] = raw_roe
+                st.success("✅ 財報數據已就緒")
+        if 'raw_roe_df' in st.session_state:
+            st.download_button("📥 下載台積電原始財報 CSV", data=st.session_state['raw_roe_df'].to_csv(index=False).encode('utf-8-sig'), file_name="raw_roe_2330.csv")
+
     with diag_c2:
-        if st.button("📥 下載籌碼原始碼 (投信診斷)", key="diag_chip"):
+        if st.button("🔍 抓取籌碼原始碼：2330 台積電", key="fetch_chip"):
             raw_chip = fetch_fm("TaiwanStockHoldingSharesPer", "2330", 60)
             if raw_chip is not None:
-                st.download_button("💾 下載台積電原始籌碼 (CSV)", data=raw_chip.to_csv(index=False).encode('utf-8-sig'), file_name="raw_chip_2330.csv")
+                st.session_state['raw_chip_df'] = raw_chip
+                st.success("✅ 籌碼數據已就緒")
+        if 'raw_chip_df' in st.session_state:
+            st.download_button("📥 下載台積電原始籌碼 CSV", data=st.session_state['raw_chip_df'].to_csv(index=False).encode('utf-8-sig'), file_name="raw_chip_2330.csv")
 
     st.divider()
     cr, cm, cd = st.columns([1,1,1])
@@ -213,21 +221,21 @@ with tab1:
             st.dataframe(all_data.style.map(lambda x: 'background-color: #FFCCCC; color: red;' if x == 0 or pd.isna(x) or str(x) == "None" else ''), width=1500)
     with cd:
         diag_df = pd.read_sql(text("SELECT ticker, stock_name, roe, fund_count, price FROM daily_scans WHERE scan_date = :t"), con=engine, params={"t": today})
-        st.download_button("📥 下載診斷 CSV", data=diag_df.to_csv(index=False).encode('utf-8-sig'), file_name=f"diag_{today}.csv")
+        st.download_button("📥 下載目前數據 CSV", data=diag_df.to_csv(index=False).encode('utf-8-sig'), file_name=f"diag_{today}.csv")
 
     if 'master_df' in st.session_state:
-        st.markdown("### 🔥 七大金剛策略中心 (漸層美化)")
+        st.markdown("### 🔥 七大金剛策略中心 (LINE 連動)")
         df = st.session_state['master_df']
         s_list = [("💎 策略 1: 超級策略", "(df['fund_count'] >= 10) & (df['roe'] > 0.05)"), ("📈 策略 2: 帶量突破前高", "(df['現價'] > df['high_20']) & (df['vol'] > df['vol_20'] * 1.5)"), ("🚀 策略 3: 三線合一多頭", "(df['sma5'] > df['ma20']) & (df['ma20'] > df['ma60'])"), ("🌀 策略 4: 布林縮口突破", "(df['現價'] > df['bbu']) & (df['bb_width'] < 0.2)"), ("👑 策略 5: 九成勝率 ATM", "(df['現價'] > df['kd20']) & (df['vol'] >= df['vol_20'] * 1.2)"), ("🛡️ 策略 6: 低階抄底防護", "(df['rsi'] < 40) & (df['現價'] > df['sma5'])"), ("🎯 策略 7: 強勢回測支撐", "abs(df['現價']-df['ma20'])/df['ma20'] < 0.02")]
         for name, cond in s_list:
-            if st.button(name):
+            if st.button(name, key=f"s_{name}"):
                 res = df[eval(cond)]; st.dataframe(res.style.background_gradient(cmap='YlOrRd', subset=['現價']), width=1500)
 
 with tab2:
-    st.header("💼 庫存股票戰略中心 (非 Yahoo 模式)")
+    st.header("💼 庫存股票戰略中心 (非 Yahoo)")
     df_p = pd.read_sql("SELECT ticker, stock_name, entry_price, qty FROM portfolio", con=engine)
     if not df_p.empty:
-        if st.button("🔄 同步庫存行情+損益精算"):
+        if st.button("🔄 同步庫存行情+精算損益"):
             pb_p = st.progress(0)
             with ThreadPoolExecutor(max_workers=10) as exe:
                 futures = {exe.submit(calc_and_save_full, r['ticker'], r['stock_name']): r['ticker'] for _, r in df_p.iterrows()}
@@ -246,22 +254,22 @@ with tab3:
     st.subheader("🛠️ 管理中心")
     c_p, c_c = st.columns(2)
     with c_p:
-        f1 = st.file_uploader("上傳股票池 CSV (自動去重)", type="csv")
-        if f1 and st.button("💾 儲存池"):
+        f1 = st.file_uploader("股票池 CSV (自動去重)", type="csv")
+        if f1 and st.button("💾 儲存並去重"):
             df_new = pd.read_csv(f1).drop_duplicates(subset=['ticker'])
             df_new.columns = df_new.columns.str.lower().str.strip()
             with engine.begin() as conn:
                 conn.execute(text("DELETE FROM stock_pool")); df_new.to_sql('stock_pool', con=engine, if_exists='append', index=False)
-            st.success("✅ 更新成功")
-        st.download_button("📥 股票池範例", data="ticker,stock_name\n2330,台積電\n2317,鴻海", file_name="sample_pool.csv")
+            st.success("✅ 股票池更新成功")
+        st.download_button("📥 範例：下載股票池 CSV", data="ticker,stock_name\n2330,台積電\n2317,鴻海", file_name="sample_pool.csv")
     with c_c:
-        f2 = st.file_uploader("上傳庫存 CSV (覆蓋)", type="csv")
-        if f2 and st.button("💾 儲存庫存"):
+        f2 = st.file_uploader("庫存 CSV (清除+覆蓋)", type="csv")
+        if f2 and st.button("💾 清除並覆蓋"):
             df_new = pd.read_csv(f2).drop_duplicates(subset=['ticker'])
             df_new.columns = df_new.columns.str.lower().str.strip()
             with engine.begin() as conn:
                 conn.execute(text("DELETE FROM portfolio")); df_new.to_sql('portfolio', con=engine, if_exists='append', index=False)
             st.success("✅ 庫存覆蓋成功")
-        st.download_button("📥 庫存範例", data="ticker,stock_name,entry_price,qty\n2330,台積電,600,1000", file_name="sample_portfolio.csv")
+        st.download_button("📥 範例：下載庫存 CSV", data="ticker,stock_name,entry_price,qty\n2330,台積電,600,1000", file_name="sample_portfolio.csv")
 
-st.caption("本系統由哲哲團隊開發。V171.0 Sponsor 全能旗艦版，贏到流湯不是夢！")
+st.caption("本系統由哲哲團隊開發。V172.0 Sponsor 全能旗艦版，贏到流湯不是夢！")
