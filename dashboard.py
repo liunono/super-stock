@@ -51,7 +51,7 @@ if 'scan_status' not in st.session_state:
 
 # ================= 2. 核心大腦 (地毯式挖掘與暴力精算) =================
 
-def def fetch_fm(dataset, ticker, start_days=160):
+def fetch_fm(dataset, ticker, start_days=160):
     """通用 API 抓取模組 (修復 Token 驗證與 Headers 傳遞)"""
     cid = str(ticker).split('.')[0].strip()
     start = (datetime.datetime.now(TW_TZ) - datetime.timedelta(days=start_days)).strftime('%Y-%m-%d')
